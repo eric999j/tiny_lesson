@@ -325,24 +325,23 @@ class TinyLessonApp:
             pady=8,
         )
         card.pack(fill="x", padx=4, pady=3)
-        
-        tk.Label(
+
+        self._render_selectable_text(
             card,
             text=word,
             font=("Segoe UI", 14, "bold"),
+            fg=card_theme["title_fg"],
             bg=card_theme["bg"],
-            fg=card_theme["title_fg"]
-        ).pack(anchor="w", pady=(0, 8))
-        
-        tk.Label(
+            pady=(0, 8),
+        )
+
+        self._render_selectable_text(
             card,
             text=display_translation,
             font=("Segoe UI", 12),
-            bg=card_theme["bg"],
             fg=card_theme["body_fg"],
-            wraplength=780,
-            justify="left"
-        ).pack(anchor="w")
+            bg=card_theme["bg"],
+        )
         
         # Playback button
         btns = ttk.Frame(card)
@@ -453,11 +452,27 @@ class TinyLessonApp:
             sub = it.get("explanation", "")
             example = it.get("example", "")
             tts_text = example or target_text
-            tk.Label(card, text=target_text, font=("Segoe UI", 11, "bold"), bg=card_theme["bg"], fg=card_theme["title_fg"]).pack(anchor="w")
+            self._render_selectable_text(
+                card,
+                text=target_text,
+                font=("Segoe UI", 11, "bold"),
+                fg=card_theme["title_fg"],
+                bg=card_theme["bg"],
+            )
             if sub:
-                tk.Label(card, text=sub, wraplength=780, justify="left", bg=card_theme["bg"], fg=card_theme["body_fg"]).pack(anchor="w")
+                self._render_selectable_text(
+                    card,
+                    text=sub,
+                    fg=card_theme["body_fg"],
+                    bg=card_theme["bg"],
+                )
             if example:
-                tk.Label(card, text=f"例：{example}", wraplength=780, justify="left", bg=card_theme["bg"], fg=card_theme["example_fg"]).pack(anchor="w")
+                self._render_selectable_text(
+                    card,
+                    text=f"例：{example}",
+                    fg=card_theme["example_fg"],
+                    bg=card_theme["bg"],
+                )
         else:
             target_text = it.get("text", "")
             reading = it.get("reading", "").strip()
@@ -467,9 +482,20 @@ class TinyLessonApp:
             if kind == "sentence":
                 self._render_sentence_with_hover(card, target_text, lang_code, card_theme)
             else:
-                tk.Label(card, text=display_text, font=("Segoe UI", 11, "bold"), bg=card_theme["bg"], fg=card_theme["title_fg"]).pack(anchor="w")
+                self._render_selectable_text(
+                    card,
+                    text=display_text,
+                    font=("Segoe UI", 11, "bold"),
+                    fg=card_theme["title_fg"],
+                    bg=card_theme["bg"],
+                )
             if sub:
-                tk.Label(card, text=sub, wraplength=780, justify="left", bg=card_theme["bg"], fg=card_theme["body_fg"]).pack(anchor="w")
+                self._render_selectable_text(
+                    card,
+                    text=sub,
+                    fg=card_theme["body_fg"],
+                    bg=card_theme["bg"],
+                )
 
         btns = ttk.Frame(card)
         btns.configure(style="Surface.TFrame")
@@ -535,7 +561,7 @@ class TinyLessonApp:
             borderwidth=0,
             highlightthickness=0,
             wrap="word",
-            cursor="arrow",
+            cursor="xterm",
             height=1,
             padx=0,
             pady=0,
@@ -553,11 +579,9 @@ class TinyLessonApp:
                 text_widget.insert("end", display, (tag,))
 
                 def _enter(e, w=lookup, l=lang_code, tw=text_widget):
-                    tw.configure(cursor="hand2")
                     self._on_word_hover_enter(e, w, l)
 
-                def _leave(e, tw=text_widget):
-                    tw.configure(cursor="arrow")
+                def _leave(e):
                     self._on_word_hover_leave(e)
 
                 text_widget.tag_bind(tag, "<Enter>", _enter)
@@ -584,6 +608,67 @@ class TinyLessonApp:
                 _adj[0] = False
 
         text_widget.bind("<Configure>", _adjust)
+
+    def _build_selectable_text_widget(
+        self,
+        parent: tk.Widget,
+        text: str,
+        *,
+        font: tuple[str, ...] = ("Segoe UI", 10),
+        fg: str,
+        bg: str,
+    ) -> tk.Text:
+        text_widget = tk.Text(
+            parent,
+            font=font,
+            bg=bg,
+            fg=fg,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            wrap="word",
+            cursor="xterm",
+            height=1,
+            padx=0,
+            pady=0,
+            spacing1=0,
+            spacing2=0,
+            spacing3=0,
+            state="normal",
+        )
+        text_widget.insert("1.0", text)
+        self._fit_text_height(text_widget)
+        text_widget.configure(state="disabled")
+        text_widget.bind("<Configure>", lambda _e, tw=text_widget: self._fit_text_height(tw))
+        return text_widget
+
+    def _render_selectable_text(
+        self,
+        parent: tk.Widget,
+        text: str,
+        *,
+        font: tuple[str, ...] = ("Segoe UI", 10),
+        fg: str,
+        bg: str,
+        pady: tuple[int, int] = (0, 2),
+    ) -> tk.Text:
+        text_widget = self._build_selectable_text_widget(
+            parent,
+            text,
+            font=font,
+            fg=fg,
+            bg=bg,
+        )
+        text_widget.pack(anchor="w", fill="x", pady=pady)
+        return text_widget
+
+    def _fit_text_height(self, text_widget: tk.Text) -> None:
+        try:
+            count = text_widget.count("1.0", "end-1c", "displaylines")
+            height = count[0] if isinstance(count, tuple) else (count or 1)
+            text_widget.configure(height=max(1, height))
+        except Exception:
+            pass
 
     # ---- word tooltip helpers ----
 
@@ -1025,29 +1110,29 @@ class TinyLessonApp:
         lang_code = (item.get("lang") or "").strip()
 
         if point:
-            tk.Label(
+            self._render_selectable_text(
                 card,
                 text=point,
                 font=("Segoe UI", 11, "bold"),
-                bg=card_theme["bg"],
                 fg=card_theme["title_fg"],
-            ).pack(anchor="w")
+                bg=card_theme["bg"],
+            )
         if explanation:
-            tk.Label(
+            self._render_selectable_text(
                 card,
                 text=explanation,
-                wraplength=780,
-                justify="left",
-                bg=card_theme["bg"],
                 fg=card_theme["body_fg"],
-            ).pack(anchor="w", pady=(4, 0))
+                bg=card_theme["bg"],
+                pady=(4, 0),
+            )
         if example:
-            tk.Label(
+            self._render_selectable_text(
                 card,
                 text="例：",
-                bg=card_theme["bg"],
                 fg=card_theme["example_fg"],
-            ).pack(anchor="w", pady=(6, 0))
+                bg=card_theme["bg"],
+                pady=(6, 0),
+            )
             self._render_sentence_with_hover(card, example, lang_code, card_theme)
         else:
             ttk.Label(card, text="這筆文法沒有例句。", style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
