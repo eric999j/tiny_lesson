@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Secrets / local config (never commit tokens or keys)
+.env
+.env.*
+secrets.json
+settings.json
+
+# TTS cache (auto-generated, can be large)
+tts_cache/
+
+# History (personal learning data)
+history.json
+
+# OS
+.DS_Store
+Thumbs.db

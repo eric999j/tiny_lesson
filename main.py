@@ -1,0 +1,6 @@
+"""Entry point for the Tiny Lesson Tkinter app."""
+from app.ui import run
+
+
+if __name__ == "__main__":
+    run()
