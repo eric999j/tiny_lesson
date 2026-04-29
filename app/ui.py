@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import copy
+import json
 import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import api_client, storage, tts
-from .config import AVAILABLE_MODELS, DEFAULT_MODEL, ensure_dirs
+from .config import AVAILABLE_MODELS, DEFAULT_MODEL, WORD_LOOKUP_CACHE_FILE, ensure_dirs
 from .theme import (
     DEFAULT_THEME,
     PAD,
@@ -43,7 +44,10 @@ class TinyLessonApp:
         self.undo_stack: list[dict] = []
         self._word_tooltip_win: tk.Toplevel | None = None
         self._word_tooltip_after_id: str | None = None
+        self._word_cache_lock = threading.Lock()
         self._word_translation_cache: dict[tuple[str, str], tuple[str, str]] = {}
+        self._load_word_translation_cache()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True)
@@ -791,10 +795,9 @@ class TinyLessonApp:
             except Exception:
                 pass
 
-        # Check in-memory cache first
-        cache_key = (word, lang_code)
-        if cache_key in self._word_translation_cache:
-            cached_tr, cached_rd = self._word_translation_cache[cache_key]
+        cached_value = self._lookup_word_translation_cache(word, lang_code)
+        if cached_value is not None:
+            cached_tr, cached_rd = cached_value
             disp = f"{cached_tr}（{cached_rd}）" if cached_rd else cached_tr
             _on_result(disp, cached_tr, cached_rd)
             return
@@ -816,7 +819,7 @@ class TinyLessonApp:
                 )
                 clean = self._extract_translation_result(result["text"])
                 reading = result.get("reading", "")
-                self._word_translation_cache[cache_key] = (clean, reading)
+                self._store_word_translation_cache(word, lang_code, clean, reading)
                 disp = f"{clean}（{reading}）" if reading else clean
                 self.root.after(0, lambda: _on_result(disp, clean, reading))
             except Exception as exc:
@@ -1301,10 +1304,11 @@ class TinyLessonApp:
     def _clear_history(self) -> None:
         if messagebox.askyesno("確認", "確定要清除所有學習歷史？此動作無法復原。"):
             storage.clear_history()
+            self._clear_word_translation_cache()
             self.undo_stack.clear()
             self._update_undo_button_state()
             self._refresh_history()
-            messagebox.showinfo("已清除", "歷史已清空。")
+            messagebox.showinfo("已清除", "歷史與查字快取已清空。")
 
     def _refresh_language_selector(self, show_status: bool = True) -> None:
         self.languages = storage.get_language_map({"languages": self.language_entries})
@@ -1386,6 +1390,65 @@ class TinyLessonApp:
         self.results_frame.configure(style="Surface.TFrame")
         self._refresh_history()
         self._restore_snapshot(self._snapshot_current_state())
+
+    def _load_word_translation_cache(self) -> None:
+        try:
+            with open(WORD_LOOKUP_CACHE_FILE, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        cache: dict[tuple[str, str], tuple[str, str]] = {}
+        for lang_code, items in payload.items():
+            if not isinstance(lang_code, str) or not isinstance(items, dict):
+                continue
+            for word, value in items.items():
+                if not isinstance(word, str) or not isinstance(value, dict):
+                    continue
+                translation = str(value.get("translation", "")).strip()
+                reading = str(value.get("reading", "")).strip()
+                if translation:
+                    cache[(word, lang_code)] = (translation, reading)
+
+        self._word_translation_cache = cache
+
+    def _persist_word_translation_cache(self) -> None:
+        payload: dict[str, dict[str, dict[str, str]]] = {}
+        for (word, lang_code), (translation, reading) in self._word_translation_cache.items():
+            payload.setdefault(lang_code, {})[word] = {
+                "translation": translation,
+                "reading": reading,
+            }
+
+        tmp_path = WORD_LOOKUP_CACHE_FILE.with_suffix(WORD_LOOKUP_CACHE_FILE.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        tmp_path.replace(WORD_LOOKUP_CACHE_FILE)
+
+    def _store_word_translation_cache(self, word: str, lang_code: str, translation: str, reading: str) -> None:
+        with self._word_cache_lock:
+            self._word_translation_cache[(word, lang_code)] = (translation, reading)
+            self._persist_word_translation_cache()
+
+    def _lookup_word_translation_cache(self, word: str, lang_code: str) -> tuple[str, str] | None:
+        with self._word_cache_lock:
+            return self._word_translation_cache.get((word, lang_code))
+
+    def _clear_word_translation_cache(self) -> None:
+        with self._word_cache_lock:
+            self._word_translation_cache.clear()
+        try:
+            WORD_LOOKUP_CACHE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _on_close(self) -> None:
+        self._cancel_tooltip_hide()
+        self._hide_word_tooltip()
+        self.root.destroy()
 
 
 def run() -> None:
