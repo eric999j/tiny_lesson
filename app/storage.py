@@ -265,10 +265,26 @@ def add_batch(lang: str, scenario: str, payload: dict[str, list[dict[str, Any]]]
     return added_ids
 
 
-def add_translation(lang: str, word: str, translation: str, slow: bool = False, reading: str = "") -> dict[str, list[str]]:
+def add_translation(
+    lang: str,
+    word: str,
+    translation: str,
+    slow: bool = False,
+    reading: str = "",
+    primary_note: str = "",
+    alternatives: list[dict[str, str]] | None = None,
+) -> dict[str, list[str]]:
     """Add a quick translation to history and return the ids added in this operation."""
     history = load_history()
     ts = int(time.time())
+    normalized_alternatives: list[dict[str, str]] = []
+    for alternative in alternatives or []:
+        if not isinstance(alternative, dict):
+            continue
+        term = str(alternative.get("term", "")).strip()
+        note = str(alternative.get("note", "")).strip()
+        if term:
+            normalized_alternatives.append({"term": term, "note": note})
     
     item = {
         "id": _make_id(lang, "t:" + word),
@@ -277,6 +293,8 @@ def add_translation(lang: str, word: str, translation: str, slow: bool = False, 
         "word": word,
         "translation": translation,
         "reading": reading,
+        "primary_note": primary_note.strip(),
+        "alternatives": normalized_alternatives,
         "scenario": "翻譯",  # Mark as quick translation
     }
     
@@ -290,13 +308,15 @@ def add_translation(lang: str, word: str, translation: str, slow: bool = False, 
         except Exception:
             pass
     
-    # Check if this translation already exists, if so don't add duplicate
-    existing_ids = {it.get("id") for it in history["translations"]}
-    if item["id"] not in existing_ids:
-        history["translations"].append(item)
-        save_history(history)
-        return {"words": [], "grammar": [], "sentences": [], "translations": [item["id"]]}
-    return {"words": [], "grammar": [], "sentences": [], "translations": []}
+    for index, existing in enumerate(history["translations"]):
+        if existing.get("id") == item["id"]:
+            history["translations"][index] = item
+            save_history(history)
+            return {"words": [], "grammar": [], "sentences": [], "translations": []}
+
+    history["translations"].append(item)
+    save_history(history)
+    return {"words": [], "grammar": [], "sentences": [], "translations": [item["id"]]}
 
 
 def delete_items(category: str, item_ids: list[str]) -> int:

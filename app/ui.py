@@ -45,7 +45,7 @@ class TinyLessonApp:
         self._word_tooltip_win: tk.Toplevel | None = None
         self._word_tooltip_after_id: str | None = None
         self._word_cache_lock = threading.Lock()
-        self._word_translation_cache: dict[tuple[str, str], tuple[str, str]] = {}
+        self._word_translation_cache: dict[tuple[str, str], dict[str, Any]] = {}
         self._load_word_translation_cache()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -202,18 +202,27 @@ class TinyLessonApp:
                         target_language=lang_name,
                         word=word_to_translate,
                     )
-                    # Extract only the translation result for display and storage
-                    clean_translation = self._extract_translation_result(result["text"])
-                    reading = result.get("reading", "")
+                    normalized = self._normalize_translation_result(result)
                     # Save translation to history
                     added = storage.add_translation(
                         lang_code,
                         word_to_translate,
-                        clean_translation,
+                        normalized["translation"],
                         slow=bool(self.settings.get("tts_slow", False)),
-                        reading=reading,
+                        reading=normalized["reading"],
+                        primary_note=normalized["primary_note"],
+                        alternatives=normalized["alternatives"],
                     )
-                    self.root.after(0, self._render_translation, word_to_translate, clean_translation, lang_code, reading)
+                    self.root.after(
+                        0,
+                        self._render_translation,
+                        word_to_translate,
+                        normalized["translation"],
+                        lang_code,
+                        normalized["reading"],
+                        normalized["primary_note"],
+                        normalized["alternatives"],
+                    )
                     self.root.after(0, self._record_undo_action, added, previous_state, "翻譯")
                     self.root.after(0, self.status_var.set, "✅ 翻譯完成。已存入歷史。")
                 except api_client.APIError as e:
@@ -302,22 +311,88 @@ class TinyLessonApp:
         text = text.split(".")[0].strip()  # Remove after English periods
         return text
 
-    def _render_translation(self, word: str, translation: str, lang_code: str, reading: str = "") -> None:
-        """Render a quick translation result."""
-        self._clear_results()
-        # Extract only the translation result
-        clean_translation = self._extract_translation_result(translation)
-        display_translation = f"{clean_translation}({reading})" if reading else clean_translation
-        tts_text = reading if reading else clean_translation
-        self.current_payload = None
-        self.current_translation = {
-            "word": word,
-            "translation": clean_translation,
+    def _normalize_translation_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        translation = self._extract_translation_result(str(result.get("text", "")))
+        reading = str(result.get("reading", "")).strip()
+        primary_note = str(result.get("primary_note", "")).strip()
+        alternatives: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        raw_alternatives = result.get("alternatives", []) or []
+        if isinstance(raw_alternatives, list):
+            for alternative in raw_alternatives:
+                if not isinstance(alternative, dict):
+                    continue
+                term = self._extract_translation_result(str(alternative.get("term", "")))
+                note = str(alternative.get("note", "")).strip()
+                if not term:
+                    continue
+                if term == translation and not primary_note and note:
+                    primary_note = note
+                    continue
+                key = (term, note)
+                if key in seen or (term == translation and not note):
+                    continue
+                seen.add(key)
+                alternatives.append({"term": term, "note": note})
+        return {
+            "translation": translation,
+            "reading": reading,
+            "primary_note": primary_note,
+            "alternatives": alternatives,
         }
-        self.current_lang_code = lang_code
+
+    def _translation_title(self, translation: str, reading: str = "") -> str:
+        return f"{translation}({reading})" if reading else translation
+
+    def _translation_detail_lines(
+        self,
+        primary_note: str = "",
+        alternatives: list[dict[str, str]] | None = None,
+    ) -> list[str]:
+        lines: list[str] = []
+        if primary_note:
+            lines.append(f"常用：{primary_note}")
+        for alternative in alternatives or []:
+            term = str(alternative.get("term", "")).strip()
+            note = str(alternative.get("note", "")).strip()
+            if term:
+                lines.append(f"{term}：{note or '不同情境用法'}")
+        return lines
+
+    def _translation_status_text(
+        self,
+        translation: str,
+        reading: str = "",
+        primary_note: str = "",
+        alternatives: list[dict[str, str]] | None = None,
+    ) -> str:
+        lines = [self._translation_title(translation, reading)]
+        lines.extend(self._translation_detail_lines(primary_note, alternatives))
+        return "\n".join([line for line in lines if line])
+
+    def _translation_summary(
+        self,
+        translation: str,
+        reading: str = "",
+        primary_note: str = "",
+        alternatives: list[dict[str, str]] | None = None,
+    ) -> str:
+        parts = [self._translation_title(translation, reading)]
+        detail_lines = self._translation_detail_lines(primary_note, alternatives)
+        if detail_lines:
+            parts.extend(detail_lines)
+        return "；".join(parts)
+
+    def _render_translation_card(
+        self,
+        title: str,
+        body: str,
+        lang_code: str,
+        *,
+        note: str = "",
+        title_font: tuple[str, ...] = ("Segoe UI", 12),
+    ) -> None:
         card_theme = self.theme.card_tokens()
-        
-        # Main translation card
         card = tk.Frame(
             self.results_frame,
             bg=card_theme["bg"],
@@ -332,30 +407,78 @@ class TinyLessonApp:
 
         self._render_selectable_text(
             card,
-            text=word,
-            font=("Segoe UI", 14, "bold"),
+            text=title,
+            font=title_font,
             fg=card_theme["title_fg"],
             bg=card_theme["bg"],
-            pady=(0, 8),
+            pady=(0, 6),
         )
-
         self._render_selectable_text(
             card,
-            text=display_translation,
-            font=("Segoe UI", 12),
+            text=body,
             fg=card_theme["body_fg"],
             bg=card_theme["bg"],
         )
-        
-        # Playback button
+        if note:
+            self._render_selectable_text(
+                card,
+                text=note,
+                fg=card_theme["body_fg"],
+                bg=card_theme["bg"],
+                pady=(4, 0),
+            )
+
         btns = ttk.Frame(card)
         btns.configure(style="Surface.TFrame")
         btns.pack(anchor="e", pady=(6, 0))
         ttk.Button(
             btns,
             text="🔊 播放",
-            command=lambda t=tts_text, l=lang_code: self._play(t, l)
+            command=lambda t=body, l=lang_code: self._play(t, l),
         ).pack(side="right")
+
+    def _render_translation(
+        self,
+        word: str,
+        translation: str,
+        lang_code: str,
+        reading: str = "",
+        primary_note: str = "",
+        alternatives: list[dict[str, str]] | None = None,
+    ) -> None:
+        """Render a quick translation result."""
+        self._clear_results()
+        clean_translation = self._extract_translation_result(translation)
+        display_translation = self._translation_title(clean_translation, reading)
+        tts_text = reading if reading else clean_translation
+        self.current_payload = None
+        self.current_translation = {
+            "word": word,
+            "translation": clean_translation,
+            "reading": reading,
+            "primary_note": primary_note,
+            "alternatives": list(alternatives or []),
+        }
+        self.current_lang_code = lang_code
+        self._render_translation_card(
+            word,
+            display_translation,
+            lang_code,
+            note=f"常用：{primary_note}" if primary_note else "",
+            title_font=("Segoe UI", 14, "bold"),
+        )
+
+        for alternative in alternatives or []:
+            term = str(alternative.get("term", "")).strip()
+            note = str(alternative.get("note", "")).strip()
+            if not term:
+                continue
+            self._render_translation_card(
+                f"同義詞：{term}",
+                term,
+                lang_code,
+                note=note,
+            )
 
     def _snapshot_current_state(self) -> dict | None:
         if self.current_payload is not None:
@@ -369,6 +492,9 @@ class TinyLessonApp:
                 "kind": "translation",
                 "word": self.current_translation.get("word", ""),
                 "translation": self.current_translation.get("translation", ""),
+                "reading": self.current_translation.get("reading", ""),
+                "primary_note": self.current_translation.get("primary_note", ""),
+                "alternatives": copy.deepcopy(self.current_translation.get("alternatives", [])),
                 "lang_code": self.current_lang_code,
             }
         return None
@@ -388,6 +514,9 @@ class TinyLessonApp:
                 snapshot.get("word", ""),
                 snapshot.get("translation", ""),
                 snapshot.get("lang_code", ""),
+                snapshot.get("reading", ""),
+                snapshot.get("primary_note", ""),
+                snapshot.get("alternatives", []),
             )
             return
         self.current_payload = None
@@ -767,9 +896,22 @@ class TinyLessonApp:
 
         # --- nested helpers for async fetch ---
 
-        def _save_word(translation: str, reading: str) -> None:
+        def _save_word(
+            translation: str,
+            reading: str,
+            primary_note: str,
+            alternatives: list[dict[str, str]],
+        ) -> None:
             slow = bool(self.settings.get("tts_slow", False))
-            storage.add_translation(lang_code, word, translation, slow=slow, reading=reading)
+            storage.add_translation(
+                lang_code,
+                word,
+                translation,
+                slow=slow,
+                reading=reading,
+                primary_note=primary_note,
+                alternatives=alternatives,
+            )
             self._refresh_history()
             try:
                 if win.winfo_exists():
@@ -777,13 +919,19 @@ class TinyLessonApp:
             except Exception:
                 pass
 
-        def _on_result(display: str, clean: str, reading: str) -> None:
+        def _on_result(
+            status_text: str,
+            clean: str,
+            reading: str,
+            primary_note: str,
+            alternatives: list[dict[str, str]],
+        ) -> None:
             try:
                 if win.winfo_exists():
-                    status_var.set(display)
+                    status_var.set(status_text)
                     save_btn.configure(
                         state="normal",
-                        command=lambda t=clean, r=reading: _save_word(t, r),
+                        command=lambda t=clean, r=reading, p=primary_note, a=alternatives: _save_word(t, r, p, a),
                     )
             except Exception:
                 pass
@@ -797,9 +945,18 @@ class TinyLessonApp:
 
         cached_value = self._lookup_word_translation_cache(word, lang_code)
         if cached_value is not None:
-            cached_tr, cached_rd = cached_value
-            disp = f"{cached_tr}（{cached_rd}）" if cached_rd else cached_tr
-            _on_result(disp, cached_tr, cached_rd)
+            _on_result(
+                self._translation_status_text(
+                    cached_value.get("translation", ""),
+                    cached_value.get("reading", ""),
+                    cached_value.get("primary_note", ""),
+                    cached_value.get("alternatives", []),
+                ),
+                cached_value.get("translation", ""),
+                cached_value.get("reading", ""),
+                cached_value.get("primary_note", ""),
+                list(cached_value.get("alternatives", [])),
+            )
             return
 
         token = self.settings.get("hf_token", "").strip()
@@ -817,11 +974,30 @@ class TinyLessonApp:
                     target_language="Traditional Chinese",
                     word=word,
                 )
-                clean = self._extract_translation_result(result["text"])
-                reading = result.get("reading", "")
-                self._store_word_translation_cache(word, lang_code, clean, reading)
-                disp = f"{clean}（{reading}）" if reading else clean
-                self.root.after(0, lambda: _on_result(disp, clean, reading))
+                normalized = self._normalize_translation_result(result)
+                self._store_word_translation_cache(
+                    word,
+                    lang_code,
+                    normalized["translation"],
+                    normalized["reading"],
+                    normalized["primary_note"],
+                    normalized["alternatives"],
+                )
+                self.root.after(
+                    0,
+                    lambda: _on_result(
+                        self._translation_status_text(
+                            normalized["translation"],
+                            normalized["reading"],
+                            normalized["primary_note"],
+                            normalized["alternatives"],
+                        ),
+                        normalized["translation"],
+                        normalized["reading"],
+                        normalized["primary_note"],
+                        normalized["alternatives"],
+                    ),
+                )
             except Exception as exc:
                 self.root.after(0, lambda: _on_error(str(exc)))
 
@@ -986,7 +1162,12 @@ class TinyLessonApp:
                 elif key == "translations":
                     raw_translation = it.get("translation", "")
                     reading = (it.get("reading") or "").strip()
-                    display_tr = f"{raw_translation}({reading})" if reading else raw_translation
+                    display_tr = self._translation_summary(
+                        raw_translation,
+                        reading,
+                        str(it.get("primary_note", "")).strip(),
+                        it.get("alternatives", []),
+                    )
                     vals = (_fmt_ts(it.get("ts", 0)), it.get("lang", ""), display_tr)
                     text = it.get("word", "")
                 else:
@@ -1401,7 +1582,7 @@ class TinyLessonApp:
         if not isinstance(payload, dict):
             return
 
-        cache: dict[tuple[str, str], tuple[str, str]] = {}
+        cache: dict[tuple[str, str], dict[str, Any]] = {}
         for lang_code, items in payload.items():
             if not isinstance(lang_code, str) or not isinstance(items, dict):
                 continue
@@ -1410,17 +1591,35 @@ class TinyLessonApp:
                     continue
                 translation = str(value.get("translation", "")).strip()
                 reading = str(value.get("reading", "")).strip()
+                primary_note = str(value.get("primary_note", "")).strip()
+                alternatives: list[dict[str, str]] = []
+                raw_alternatives = value.get("alternatives", []) or []
+                if isinstance(raw_alternatives, list):
+                    for alternative in raw_alternatives:
+                        if not isinstance(alternative, dict):
+                            continue
+                        term = str(alternative.get("term", "")).strip()
+                        note = str(alternative.get("note", "")).strip()
+                        if term:
+                            alternatives.append({"term": term, "note": note})
                 if translation:
-                    cache[(word, lang_code)] = (translation, reading)
+                    cache[(word, lang_code)] = {
+                        "translation": translation,
+                        "reading": reading,
+                        "primary_note": primary_note,
+                        "alternatives": alternatives,
+                    }
 
         self._word_translation_cache = cache
 
     def _persist_word_translation_cache(self) -> None:
         payload: dict[str, dict[str, dict[str, str]]] = {}
-        for (word, lang_code), (translation, reading) in self._word_translation_cache.items():
+        for (word, lang_code), value in self._word_translation_cache.items():
             payload.setdefault(lang_code, {})[word] = {
-                "translation": translation,
-                "reading": reading,
+                "translation": str(value.get("translation", "")).strip(),
+                "reading": str(value.get("reading", "")).strip(),
+                "primary_note": str(value.get("primary_note", "")).strip(),
+                "alternatives": list(value.get("alternatives", [])),
             }
 
         tmp_path = WORD_LOOKUP_CACHE_FILE.with_suffix(WORD_LOOKUP_CACHE_FILE.suffix + ".tmp")
@@ -1428,12 +1627,25 @@ class TinyLessonApp:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
         tmp_path.replace(WORD_LOOKUP_CACHE_FILE)
 
-    def _store_word_translation_cache(self, word: str, lang_code: str, translation: str, reading: str) -> None:
+    def _store_word_translation_cache(
+        self,
+        word: str,
+        lang_code: str,
+        translation: str,
+        reading: str,
+        primary_note: str,
+        alternatives: list[dict[str, str]],
+    ) -> None:
         with self._word_cache_lock:
-            self._word_translation_cache[(word, lang_code)] = (translation, reading)
+            self._word_translation_cache[(word, lang_code)] = {
+                "translation": translation,
+                "reading": reading,
+                "primary_note": primary_note,
+                "alternatives": list(alternatives),
+            }
             self._persist_word_translation_cache()
 
-    def _lookup_word_translation_cache(self, word: str, lang_code: str) -> tuple[str, str] | None:
+    def _lookup_word_translation_cache(self, word: str, lang_code: str) -> dict[str, Any] | None:
         with self._word_cache_lock:
             return self._word_translation_cache.get((word, lang_code))
 
