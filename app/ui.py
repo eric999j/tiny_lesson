@@ -418,7 +418,7 @@ class TinyLessonApp:
             text=body,
             fg=card_theme["body_fg"],
             bg=card_theme["bg"],
-            horizontal_drag=True,
+            # 翻譯主體不需要左右捲動，僅說明（note）保留捲軸
         )
         if note:
             self._render_selectable_text(
