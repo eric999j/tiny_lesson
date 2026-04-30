@@ -1214,6 +1214,22 @@ class TinyLessonApp:
             tv.delete(*tv.get_children())
             items = sorted(history.get(key, []), key=lambda x: x.get("ts", 0), reverse=True)
             for it in items:
+                # 翻譯（translations）不使用語境（scenario）摺疊群組，直接列在根目錄
+                view["item_lookup"][it.get("id")] = it
+                if key == "translations":
+                    raw_translation = it.get("translation", "")
+                    reading = (it.get("reading") or "").strip()
+                    display_tr = self._translation_summary(
+                        raw_translation,
+                        reading,
+                        str(it.get("primary_note", "")).strip(),
+                        it.get("alternatives", []),
+                    )
+                    vals = (_fmt_ts(it.get("ts", 0)), it.get("lang", ""), display_tr)
+                    text = it.get("word", "")
+                    tv.insert("", "end", iid=it.get("id"), text=text, values=vals)
+                    continue
+
                 scenario = it.get("scenario", "未分類") or "未分類"
                 scenario_id = view["scenario_lookup"].get(scenario)
                 if not scenario_id:
@@ -1229,7 +1245,7 @@ class TinyLessonApp:
                     )
                     view["scenario_lookup"][scenario] = scenario_id
                     view["scenario_id_lookup"][scenario_id] = scenario
-                view["item_lookup"][it.get("id")] = it
+
                 if key == "words":
                     vals = (_fmt_ts(it.get("ts", 0)), it.get("lang", ""), it.get("translation", ""))
                     raw_text = it.get("text", "")
@@ -1238,17 +1254,6 @@ class TinyLessonApp:
                 elif key == "grammar":
                     vals = (_fmt_ts(it.get("ts", 0)), it.get("lang", ""), it.get("explanation", ""), it.get("example", ""))
                     text = it.get("point", "")
-                elif key == "translations":
-                    raw_translation = it.get("translation", "")
-                    reading = (it.get("reading") or "").strip()
-                    display_tr = self._translation_summary(
-                        raw_translation,
-                        reading,
-                        str(it.get("primary_note", "")).strip(),
-                        it.get("alternatives", []),
-                    )
-                    vals = (_fmt_ts(it.get("ts", 0)), it.get("lang", ""), display_tr)
-                    text = it.get("word", "")
                 else:
                     vals = (_fmt_ts(it.get("ts", 0)), it.get("lang", ""), it.get("translation", ""))
                     text = it.get("text", "")
