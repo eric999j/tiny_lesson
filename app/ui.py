@@ -1451,20 +1451,43 @@ class TinyLessonApp:
                 bg=card_theme["bg"],
             )
 
-        full_translation = self._translation_status_text(
-            translation,
-            reading,
-            primary_note,
-            alternatives,
-        )
-        if full_translation:
+        # 顯示翻譯標題（翻譯 + 讀音）
+        title = self._translation_title(translation, reading)
+        if title:
             self._render_selectable_text(
                 card,
-                text=full_translation,
+                text=title,
                 fg=card_theme["body_fg"],
                 bg=card_theme["bg"],
                 pady=(4, 0),
-                horizontal_drag=True,
+            )
+
+        # 顯示常用說明
+        if primary_note:
+            self._render_selectable_text(
+                card,
+                text=f"常用：{primary_note}",
+                fg=card_theme["body_fg"],
+                bg=card_theme["bg"],
+                pady=(2, 0),
+            )
+
+        # 逐行顯示同義詞 / 替代詞，確保可見
+        for alt in alternatives or []:
+            try:
+                term = str(alt.get("term", "")).strip()
+                note = str(alt.get("note", "")).strip()
+            except Exception:
+                continue
+            if not term:
+                continue
+            line = f"同義詞：{term}：{note or '不同情境用法'}"
+            self._render_selectable_text(
+                card,
+                text=line,
+                fg=card_theme["body_fg"],
+                bg=card_theme["bg"],
+                pady=(2, 0),
             )
 
     def _update_history_action_state(self, key: str) -> None:
