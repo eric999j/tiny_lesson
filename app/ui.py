@@ -1117,11 +1117,12 @@ class TinyLessonApp:
                 tv.heading(cid, text=ctitle)
                 tv.column(cid, width=cw, anchor="w")
             vsb = ttk.Scrollbar(tree_holder, orient="vertical", command=tv.yview)
-            xsb = ttk.Scrollbar(tree_holder, orient="horizontal", command=tv.xview)
-            tv.configure(yscrollcommand=vsb.set, xscrollcommand=xsb.set)
+            # horizontal scrollbar intentionally omitted to avoid visual clutter;
+            # users can pan horizontally via right-drag or Shift+MouseWheel
+            tv.configure(yscrollcommand=vsb.set)
             tv.pack(side="left", fill="both", expand=True)
             vsb.pack(side="right", fill="y")
-            xsb.pack(side="bottom", fill="x")
+            # xsb intentionally not packed
             # double-click to delete
             tv.bind("<Double-1>", lambda e, k=key: self._history_delete(k))
             tv.bind("<<TreeviewSelect>>", lambda _e, k=key: self._on_history_select(k))
