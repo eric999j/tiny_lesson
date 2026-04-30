@@ -418,6 +418,7 @@ class TinyLessonApp:
             text=body,
             fg=card_theme["body_fg"],
             bg=card_theme["bg"],
+            horizontal_drag=True,
         )
         if note:
             self._render_selectable_text(
@@ -426,6 +427,7 @@ class TinyLessonApp:
                 fg=card_theme["body_fg"],
                 bg=card_theme["bg"],
                 pady=(4, 0),
+                horizontal_drag=True,
             )
 
         btns = ttk.Frame(card)
@@ -598,6 +600,7 @@ class TinyLessonApp:
                     text=sub,
                     fg=card_theme["body_fg"],
                     bg=card_theme["bg"],
+                    horizontal_drag=True,
                 )
             if example:
                 self._render_selectable_text(
@@ -605,6 +608,7 @@ class TinyLessonApp:
                     text=f"例：{example}",
                     fg=card_theme["example_fg"],
                     bg=card_theme["bg"],
+                    horizontal_drag=True,
                 )
         else:
             target_text = it.get("text", "")
@@ -613,7 +617,7 @@ class TinyLessonApp:
             tts_text = target_text
             display_text = f"{target_text}({reading})" if reading else target_text
             if kind == "sentence":
-                self._render_sentence_with_hover(card, target_text, lang_code, card_theme)
+                self._render_sentence_with_hover(card, display_text, lang_code, card_theme)
             else:
                 self._render_selectable_text(
                     card,
@@ -628,6 +632,7 @@ class TinyLessonApp:
                     text=sub,
                     fg=card_theme["body_fg"],
                     bg=card_theme["bg"],
+                    horizontal_drag=True,
                 )
 
         btns = ttk.Frame(card)
@@ -685,15 +690,18 @@ class TinyLessonApp:
         self, parent: tk.Widget, sentence_text: str, lang_code: str, card_theme: dict
     ) -> None:
         """Render a sentence as a tk.Text widget with per-word hover tooltips."""
+        container = tk.Frame(parent, bg=card_theme["bg"])
+        container.pack(anchor="w", fill="x", pady=(0, 2))
+
         text_widget = tk.Text(
-            parent,
+            container,
             font=("Segoe UI", 11, "bold"),
             bg=card_theme["bg"],
             fg=card_theme["title_fg"],
             relief="flat",
             borderwidth=0,
             highlightthickness=0,
-            wrap="word",
+            wrap="none",
             cursor="xterm",
             height=1,
             padx=0,
@@ -703,7 +711,12 @@ class TinyLessonApp:
             spacing3=0,
             state="normal",
         )
-        text_widget.pack(anchor="w", fill="x", pady=(0, 2))
+        text_widget.pack(anchor="w", fill="x")
+
+        scrollbar = ttk.Scrollbar(container, orient="horizontal", command=text_widget.xview)
+        scrollbar.pack(fill="x", pady=(2, 0))
+        text_widget.configure(xscrollcommand=scrollbar.set)
+        self._bind_horizontal_drag(text_widget)
 
         tokens = self._tokenize_sentence(sentence_text)
         for i, (display, lookup) in enumerate(tokens):
@@ -750,6 +763,7 @@ class TinyLessonApp:
         font: tuple[str, ...] = ("Segoe UI", 10),
         fg: str,
         bg: str,
+        wrap: str = "word",
     ) -> tk.Text:
         text_widget = tk.Text(
             parent,
@@ -759,7 +773,7 @@ class TinyLessonApp:
             relief="flat",
             borderwidth=0,
             highlightthickness=0,
-            wrap="word",
+            wrap=wrap,
             cursor="xterm",
             height=1,
             padx=0,
@@ -784,7 +798,26 @@ class TinyLessonApp:
         fg: str,
         bg: str,
         pady: tuple[int, int] = (0, 2),
+        horizontal_drag: bool = False,
     ) -> tk.Text:
+        if horizontal_drag:
+            container = tk.Frame(parent, bg=bg)
+            container.pack(anchor="w", fill="x", pady=pady)
+            text_widget = self._build_selectable_text_widget(
+                container,
+                text,
+                font=font,
+                fg=fg,
+                bg=bg,
+                wrap="none",
+            )
+            text_widget.pack(anchor="w", fill="x")
+            scrollbar = ttk.Scrollbar(container, orient="horizontal", command=text_widget.xview)
+            scrollbar.pack(fill="x", pady=(2, 0))
+            text_widget.configure(xscrollcommand=scrollbar.set)
+            self._bind_horizontal_drag(text_widget)
+            return text_widget
+
         text_widget = self._build_selectable_text_widget(
             parent,
             text,
@@ -802,6 +835,25 @@ class TinyLessonApp:
             text_widget.configure(height=max(1, height))
         except Exception:
             pass
+
+    def _bind_horizontal_drag(self, text_widget: tk.Text) -> None:
+        def _start_drag(event: tk.Event) -> str:
+            text_widget.scan_mark(event.x, 0)
+            return "break"
+
+        def _drag(event: tk.Event) -> str:
+            text_widget.scan_dragto(event.x, 0, gain=1)
+            return "break"
+
+        def _shift_wheel(event: tk.Event) -> str:
+            delta = int(-1 * (event.delta / 120)) if getattr(event, "delta", 0) else 0
+            if delta:
+                text_widget.xview_scroll(delta, "units")
+            return "break"
+
+        text_widget.bind("<ButtonPress-3>", _start_drag)
+        text_widget.bind("<B3-Motion>", _drag)
+        text_widget.bind("<Shift-MouseWheel>", _shift_wheel)
 
     # ---- word tooltip helpers ----
 
@@ -1065,15 +1117,20 @@ class TinyLessonApp:
                 tv.heading(cid, text=ctitle)
                 tv.column(cid, width=cw, anchor="w")
             vsb = ttk.Scrollbar(tree_holder, orient="vertical", command=tv.yview)
-            tv.configure(yscrollcommand=vsb.set)
+            xsb = ttk.Scrollbar(tree_holder, orient="horizontal", command=tv.xview)
+            tv.configure(yscrollcommand=vsb.set, xscrollcommand=xsb.set)
             tv.pack(side="left", fill="both", expand=True)
             vsb.pack(side="right", fill="y")
+            xsb.pack(side="bottom", fill="x")
             # double-click to delete
             tv.bind("<Double-1>", lambda e, k=key: self._history_delete(k))
             tv.bind("<<TreeviewSelect>>", lambda _e, k=key: self._on_history_select(k))
+            tv.bind("<Shift-MouseWheel>", self._on_history_shift_mousewheel)
 
             grammar_preview = None
             grammar_preview_body = None
+            translation_preview = None
+            translation_preview_body = None
             if key == "grammar":
                 grammar_preview = ttk.Frame(frame, style="Surface.TFrame")
                 grammar_preview.pack(fill="x", padx=4, pady=(8, 0))
@@ -1083,6 +1140,18 @@ class TinyLessonApp:
                 ttk.Label(
                     grammar_preview_body,
                     text="選取一筆文法歷史後，這裡會顯示可逐字懸停查詢的例句。",
+                    style="Muted.TLabel",
+                    justify="left",
+                ).pack(anchor="w")
+            elif key == "translations":
+                translation_preview = ttk.Frame(frame, style="Surface.TFrame")
+                translation_preview.pack(fill="x", padx=4, pady=(8, 0))
+                ttk.Label(translation_preview, text="翻譯預覽", style="SectionTitle.TLabel").pack(anchor="w")
+                translation_preview_body = ttk.Frame(translation_preview, style="Surface.TFrame")
+                translation_preview_body.pack(fill="x", pady=(6, 0))
+                ttk.Label(
+                    translation_preview_body,
+                    text="選取一筆翻譯歷史後，這裡會顯示完整翻譯內容。",
                     style="Muted.TLabel",
                     justify="left",
                 ).pack(anchor="w")
@@ -1107,6 +1176,8 @@ class TinyLessonApp:
                 "action_hint": action_hint,
                 "grammar_preview": grammar_preview,
                 "grammar_preview_body": grammar_preview_body,
+                "translation_preview": translation_preview,
+                "translation_preview_body": translation_preview_body,
                 "item_lookup": {},
                 "scenario_lookup": {},
                 "scenario_id_lookup": {},
@@ -1124,6 +1195,13 @@ class TinyLessonApp:
         idx = self.history_sub.index(self.history_sub.select())
         key = ["words", "grammar", "sentences", "translations"][idx]
         self.history_views[key]["btn_bar"].pack(in_=self.history_btn_holder, side="left")
+
+    def _on_history_shift_mousewheel(self, event) -> str:
+        widget = event.widget
+        delta = int(-1 * (event.delta / 120)) if getattr(event, "delta", 0) else 0
+        if delta:
+            widget.xview_scroll(delta, "units")
+        return "break"
 
     def _refresh_history(self) -> None:
         history = storage.load_history()
@@ -1308,6 +1386,7 @@ class TinyLessonApp:
                 fg=card_theme["body_fg"],
                 bg=card_theme["bg"],
                 pady=(4, 0),
+                horizontal_drag=True,
             )
         if example:
             self._render_selectable_text(
@@ -1321,6 +1400,67 @@ class TinyLessonApp:
         else:
             ttk.Label(card, text="這筆文法沒有例句。", style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
 
+    def _set_history_translation_preview(self, item: dict | None) -> None:
+        view = self.history_views.get("translations", {})
+        body = view.get("translation_preview_body")
+        if body is None:
+            return
+        for child in body.winfo_children():
+            child.destroy()
+
+        if not item:
+            ttk.Label(
+                body,
+                text="選取一筆翻譯歷史後，這裡會顯示完整翻譯內容。",
+                style="Muted.TLabel",
+                justify="left",
+            ).pack(anchor="w")
+            return
+
+        card_theme = self.theme.card_tokens()
+        card = tk.Frame(
+            body,
+            bg=card_theme["bg"],
+            highlightbackground=card_theme["border"],
+            highlightcolor=card_theme["border"],
+            highlightthickness=1,
+            bd=0,
+            padx=10,
+            pady=8,
+        )
+        card.pack(fill="x")
+
+        word = (item.get("word") or "").strip()
+        translation = (item.get("translation") or "").strip()
+        reading = (item.get("reading") or "").strip()
+        primary_note = str(item.get("primary_note", "")).strip()
+        alternatives = item.get("alternatives", [])
+
+        if word:
+            self._render_selectable_text(
+                card,
+                text=word,
+                font=("Segoe UI", 11, "bold"),
+                fg=card_theme["title_fg"],
+                bg=card_theme["bg"],
+            )
+
+        full_translation = self._translation_status_text(
+            translation,
+            reading,
+            primary_note,
+            alternatives,
+        )
+        if full_translation:
+            self._render_selectable_text(
+                card,
+                text=full_translation,
+                fg=card_theme["body_fg"],
+                bg=card_theme["bg"],
+                pady=(4, 0),
+                horizontal_drag=True,
+            )
+
     def _update_history_action_state(self, key: str) -> None:
         view = self.history_views[key]
         item_id, item = self._selected_item(key)
@@ -1328,6 +1468,8 @@ class TinyLessonApp:
         action_hint: ttk.Label = view["action_hint"]
         if key == "grammar":
             self._set_history_grammar_preview(item)
+        elif key == "translations":
+            self._set_history_translation_preview(item)
         if item:
             play_btn.configure(state="normal")
             label = item.get("text") or item.get("point") or "這筆內容"
