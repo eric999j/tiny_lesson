@@ -18,6 +18,7 @@ CACHE_DIR: Path = DATA_DIR / "tts_cache"
 HISTORY_FILE: Path = DATA_DIR / "history.json"
 SETTINGS_FILE: Path = DATA_DIR / "settings.json"
 WORD_LOOKUP_CACHE_FILE: Path = DATA_DIR / "word_lookup_cache.json"
+LESSON_CACHE_FILE: Path = DATA_DIR / "lesson_cache.json"
 
 
 def ensure_dirs() -> None:

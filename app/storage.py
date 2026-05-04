@@ -4,10 +4,18 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import re
 from typing import Any
 
 from . import tts
-from .config import DEFAULT_LANGUAGES, HISTORY_FILE, SETTINGS_FILE, build_language_map, ensure_dirs
+from .config import (
+    DEFAULT_LANGUAGES,
+    HISTORY_FILE,
+    LESSON_CACHE_FILE,
+    SETTINGS_FILE,
+    build_language_map,
+    ensure_dirs,
+)
 
 
 _EMPTY_HISTORY: dict[str, list[dict[str, Any]]] = {
@@ -147,6 +155,73 @@ def save_settings(data: dict[str, Any]) -> None:
     payload = dict(data)
     payload["languages"] = normalize_languages(payload.get("languages", []))
     _write_json(SETTINGS_FILE, payload)
+
+
+def _normalize_lesson_scenario(scenario: str) -> str:
+    return re.sub(r"\s+", " ", str(scenario or "").strip())
+
+
+def _normalize_lesson_payload(payload: Any) -> dict[str, list[dict[str, Any]]] | None:
+    if not isinstance(payload, dict):
+        return None
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for key in ["words", "grammar", "sentences"]:
+        value = payload.get(key, [])
+        normalized[key] = value if isinstance(value, list) else []
+    return normalized
+
+
+def load_lesson_cache() -> dict[str, dict[str, dict[str, Any]]]:
+    data = _read_json(LESSON_CACHE_FILE, {})
+    if not isinstance(data, dict):
+        return {}
+    normalized: dict[str, dict[str, dict[str, Any]]] = {}
+    for lang, scenarios in data.items():
+        if not isinstance(lang, str) or not isinstance(scenarios, dict):
+            continue
+        lang_bucket: dict[str, dict[str, Any]] = {}
+        for scenario, entry in scenarios.items():
+            if not isinstance(scenario, str) or not isinstance(entry, dict):
+                continue
+            payload = _normalize_lesson_payload(entry.get("payload"))
+            if payload is None:
+                continue
+            lang_bucket[scenario] = {
+                "ts": int(entry.get("ts", 0) or 0),
+                "payload": payload,
+            }
+        if lang_bucket:
+            normalized[lang] = lang_bucket
+    return normalized
+
+
+def get_cached_lesson(lang: str, scenario: str) -> dict[str, list[dict[str, Any]]] | None:
+    normalized_scenario = _normalize_lesson_scenario(scenario)
+    if not normalized_scenario:
+        return None
+    cache = load_lesson_cache()
+    entry = cache.get(str(lang or ""), {}).get(normalized_scenario)
+    if not isinstance(entry, dict):
+        return None
+    payload = _normalize_lesson_payload(entry.get("payload"))
+    return payload
+
+
+def save_cached_lesson(lang: str, scenario: str, payload: dict[str, list[dict[str, Any]]]) -> None:
+    normalized_scenario = _normalize_lesson_scenario(scenario)
+    normalized_payload = _normalize_lesson_payload(payload)
+    if not lang or not normalized_scenario or normalized_payload is None:
+        return
+    cache = load_lesson_cache()
+    cache.setdefault(lang, {})[normalized_scenario] = {
+        "ts": int(time.time()),
+        "payload": normalized_payload,
+    }
+    _write_json(LESSON_CACHE_FILE, cache)
+
+
+def clear_lesson_cache() -> None:
+    _write_json(LESSON_CACHE_FILE, {})
 
 
 # ---------- history ----------

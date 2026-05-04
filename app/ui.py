@@ -174,12 +174,6 @@ class TinyLessonApp:
             messagebox.showwarning("語言代碼無效", f"{e}\n請到『設定』修正這個語言的 TTS 代碼。")
             self.notebook.select(self.settings_tab)
             return
-
-        token = self.settings.get("hf_token", "").strip()
-        if not token:
-            messagebox.showwarning("缺少 Token", "請先到『設定』填入 Hugging Face API Token。")
-            self.notebook.select(self.settings_tab)
-            return
         previous_state = self._snapshot_current_state()
 
         # Check if this is a quick translation mode: /[word]
@@ -187,6 +181,11 @@ class TinyLessonApp:
             word_to_translate = scenario[1:].strip()
             if not word_to_translate:
                 messagebox.showinfo("提示", "請輸入要翻譯的字詞。格式：/[字詞]")
+                return
+            token = self.settings.get("hf_token", "").strip()
+            if not token:
+                messagebox.showwarning("缺少 Token", "請先到『設定』填入 Hugging Face API Token。")
+                self.notebook.select(self.settings_tab)
                 return
             
             self.generate_btn.configure(state="disabled")
@@ -258,6 +257,36 @@ class TinyLessonApp:
         self._clear_results()
 
         model = self.settings.get("model", "").strip() or DEFAULT_MODEL
+        cached_payload = storage.get_cached_lesson(lang_code, scenario)
+        if cached_payload is not None:
+            def _load_cached_work() -> None:
+                try:
+                    added = storage.add_batch(
+                        lang_code,
+                        scenario,
+                        cached_payload,
+                        slow=bool(self.settings.get("tts_slow", False)),
+                    )
+                    self.root.after(0, self._render_results, cached_payload, lang_code)
+                    self.root.after(0, self._record_undo_action, added, previous_state, "生成")
+                    self.root.after(0, self.status_var.set, "✅ 已從離線快取載入課程，並同步到歷史。")
+                except Exception as e:
+                    self.root.after(0, self.status_var.set, f"❌ 離線快取載入失敗：{e}")
+                finally:
+                    self.root.after(
+                        0,
+                        lambda: self.generate_btn.configure(state="normal" if self.languages else "disabled"),
+                    )
+
+            threading.Thread(target=_load_cached_work, daemon=True).start()
+            return
+
+        token = self.settings.get("hf_token", "").strip()
+        if not token:
+            self.status_var.set("⚠ 找不到可用的離線快取，且尚未設定 Hugging Face Token。")
+            self.generate_btn.configure(state="normal" if self.languages else "disabled")
+            self.notebook.select(self.settings_tab)
+            return
 
         def _work():
             try:
@@ -267,6 +296,7 @@ class TinyLessonApp:
                     target_language=lang_name,
                     scenario=scenario,
                 )
+                storage.save_cached_lesson(lang_code, scenario, payload)
                 added = storage.add_batch(lang_code, scenario, payload, slow=bool(self.settings.get("tts_slow", False)))
                 self.root.after(0, self._render_results, payload, lang_code)
                 self.root.after(0, self._record_undo_action, added, previous_state, "生成")
@@ -1068,6 +1098,33 @@ class TinyLessonApp:
 
     # ---------- history tab ----------
     def _build_history_tab(self) -> None:
+        filter_bar = ttk.Frame(self.history_tab, style="Surface.TFrame")
+        filter_bar.pack(fill="x", padx=PAD, pady=(PAD, 0))
+
+        ttk.Label(filter_bar, text="搜尋：").pack(side="left")
+        self.history_search_var = tk.StringVar()
+        history_search_entry = ttk.Entry(filter_bar, textvariable=self.history_search_var, width=28)
+        history_search_entry.pack(side="left", padx=(0, 8))
+        history_search_entry.bind("<KeyRelease>", lambda _e: self._refresh_history())
+
+        ttk.Label(filter_bar, text="語言：").pack(side="left")
+        self.history_lang_var = tk.StringVar(value="全部")
+        self.history_lang_combo = ttk.Combobox(
+            filter_bar,
+            textvariable=self.history_lang_var,
+            values=["全部"],
+            state="readonly",
+            width=18,
+        )
+        self.history_lang_combo.pack(side="left", padx=(0, 8))
+        self.history_lang_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_history())
+
+        ttk.Button(filter_bar, text="清除篩選", command=self._clear_history_filters).pack(side="left")
+        self.history_filter_summary_var = tk.StringVar(value="")
+        ttk.Label(filter_bar, textvariable=self.history_filter_summary_var, style="Muted.TLabel").pack(
+            side="right"
+        )
+
         sub = ttk.Notebook(self.history_tab)
         sub.pack(fill="both", expand=True, padx=PAD, pady=PAD)
         self.history_sub = sub
@@ -1206,6 +1263,10 @@ class TinyLessonApp:
 
     def _refresh_history(self) -> None:
         history = storage.load_history()
+        query = self.history_search_var.get().strip().lower()
+        selected_lang = self.history_lang_var.get().strip() if hasattr(self, "history_lang_var") else "全部"
+        self._refresh_history_language_filter(history)
+        visible_total = 0
         for key, view in self.history_views.items():
             tv: ttk.Treeview = view["tv"]
             view["item_lookup"] = {}
@@ -1214,6 +1275,9 @@ class TinyLessonApp:
             tv.delete(*tv.get_children())
             items = sorted(history.get(key, []), key=lambda x: x.get("ts", 0), reverse=True)
             for it in items:
+                if not self._history_item_matches(it, query, selected_lang):
+                    continue
+                visible_total += 1
                 # 翻譯（translations）不使用語境（scenario）摺疊群組，直接列在根目錄
                 view["item_lookup"][it.get("id")] = it
                 if key == "translations":
@@ -1259,6 +1323,54 @@ class TinyLessonApp:
                     text = it.get("text", "")
                 tv.insert(scenario_id, "end", iid=it.get("id"), text=text, values=vals)
             self._update_history_action_state(key)
+        self.history_filter_summary_var.set(f"目前顯示 {visible_total} 筆")
+
+    def _refresh_history_language_filter(self, history: dict[str, list[dict]]) -> None:
+        if not hasattr(self, "history_lang_combo"):
+            return
+        known_langs: list[str] = []
+        for items in history.values():
+            for item in items:
+                lang = str(item.get("lang", "")).strip()
+                if lang and lang not in known_langs:
+                    known_langs.append(lang)
+        values = ["全部", *known_langs]
+        self.history_lang_combo.configure(values=values)
+        if self.history_lang_var.get() not in values:
+            self.history_lang_var.set("全部")
+
+    def _clear_history_filters(self) -> None:
+        self.history_search_var.set("")
+        self.history_lang_var.set("全部")
+        self._refresh_history()
+
+    def _history_item_matches(self, item: dict, query: str, selected_lang: str) -> bool:
+        item_lang = str(item.get("lang", "")).strip()
+        if selected_lang and selected_lang != "全部" and item_lang != selected_lang:
+            return False
+        if not query:
+            return True
+        search_parts = [
+            str(item.get("scenario", "")),
+            str(item.get("text", "")),
+            str(item.get("translation", "")),
+            str(item.get("point", "")),
+            str(item.get("explanation", "")),
+            str(item.get("example", "")),
+            str(item.get("word", "")),
+            str(item.get("reading", "")),
+            str(item.get("primary_note", "")),
+            item_lang,
+        ]
+        alternatives = item.get("alternatives", [])
+        if isinstance(alternatives, list):
+            for alternative in alternatives:
+                if not isinstance(alternative, dict):
+                    continue
+                search_parts.append(str(alternative.get("term", "")))
+                search_parts.append(str(alternative.get("note", "")))
+        haystack = "\n".join(part.lower() for part in search_parts if part)
+        return query in haystack
 
     def _selected_item(self, key: str):
         tv: ttk.Treeview = self.history_views[key]["tv"]
@@ -1656,11 +1768,12 @@ class TinyLessonApp:
     def _clear_history(self) -> None:
         if messagebox.askyesno("確認", "確定要清除所有學習歷史？此動作無法復原。"):
             storage.clear_history()
+            storage.clear_lesson_cache()
             self._clear_word_translation_cache()
             self.undo_stack.clear()
             self._update_undo_button_state()
             self._refresh_history()
-            messagebox.showinfo("已清除", "歷史與查字快取已清空。")
+            messagebox.showinfo("已清除", "歷史、課程快取與查字快取已清空。")
 
     def _refresh_language_selector(self, show_status: bool = True) -> None:
         self.languages = storage.get_language_map({"languages": self.language_entries})
