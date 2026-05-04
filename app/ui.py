@@ -1167,7 +1167,7 @@ class TinyLessonApp:
             tree_holder = ttk.Frame(frame, style="Surface.TFrame")
             tree_holder.pack(fill="both", expand=True)
 
-            tv = ttk.Treeview(tree_holder, columns=[c[0] for c in cols], show="tree headings")
+            tv = ttk.Treeview(tree_holder, columns=[c[0] for c in cols], show="tree headings", selectmode="extended")
             tv.heading("#0", text="語境 / 內容")
             tv.column("#0", width=280, anchor="w")
             for cid, ctitle, cw in cols:
@@ -1180,10 +1180,11 @@ class TinyLessonApp:
             tv.pack(side="left", fill="both", expand=True)
             vsb.pack(side="right", fill="y")
             # xsb intentionally not packed
-            # double-click to delete
-            tv.bind("<Double-1>", lambda e, k=key: self._history_delete(k))
+            # double-click deletes only actual leaf items; scenario groups use right-click menu
+            tv.bind("<Double-1>", lambda e, k=key: self._on_history_double_click(e, k))
             tv.bind("<<TreeviewSelect>>", lambda _e, k=key: self._on_history_select(k))
             tv.bind("<Shift-MouseWheel>", self._on_history_shift_mousewheel)
+            tv.bind("<Button-3>", lambda e, k=key: self._on_history_right_click(e, k))
 
             grammar_preview = None
             grammar_preview_body = None
@@ -1239,6 +1240,7 @@ class TinyLessonApp:
                 "item_lookup": {},
                 "scenario_lookup": {},
                 "scenario_id_lookup": {},
+                "menu": None,
             }
 
         # Show button bar matching active sub-tab
@@ -1269,6 +1271,11 @@ class TinyLessonApp:
         visible_total = 0
         for key, view in self.history_views.items():
             tv: ttk.Treeview = view["tv"]
+            expanded_scenarios = {
+                scenario_id
+                for scenario_id in tv.get_children("")
+                if str(scenario_id).startswith("scenario::") and bool(tv.item(scenario_id, "open"))
+            }
             view["item_lookup"] = {}
             view["scenario_lookup"] = {}
             view["scenario_id_lookup"] = {}
@@ -1305,7 +1312,7 @@ class TinyLessonApp:
                         iid=scenario_id,
                         text=scenario,
                         values=(latest_ts, it.get("lang", ""), *([""] * (len(tv["columns"]) - 2))),
-                        open=False,
+                        open=scenario_id in expanded_scenarios,
                     )
                     view["scenario_lookup"][scenario] = scenario_id
                     view["scenario_id_lookup"][scenario_id] = scenario
@@ -1390,6 +1397,107 @@ class TinyLessonApp:
                 return item_id, it
         return item_id, None
 
+    def _selected_history_leaf_items(self, key: str) -> list[tuple[str, dict]]:
+        tv: ttk.Treeview = self.history_views[key]["tv"]
+        item_lookup: dict = self.history_views[key].get("item_lookup", {})
+        selected_items: list[tuple[str, dict]] = []
+        for item_id in tv.selection():
+            if str(item_id).startswith("scenario::"):
+                continue
+            item = item_lookup.get(item_id)
+            if item:
+                selected_items.append((str(item_id), item))
+        return selected_items
+
+    def _scenario_child_item_ids(self, key: str, scenario_id: str) -> list[str]:
+        return [
+            str(child_id)
+            for child_id in self.history_views[key]["tv"].get_children(scenario_id)
+            if not str(child_id).startswith("scenario::")
+        ]
+
+    def _on_history_double_click(self, event, key: str) -> str:
+        tv: ttk.Treeview = self.history_views[key]["tv"]
+        row_id = tv.identify_row(event.y)
+        if not row_id:
+            return "break"
+        if str(row_id).startswith("scenario::"):
+            return "break"
+        tv.selection_set(row_id)
+        tv.focus(row_id)
+        self._history_delete(key)
+        return "break"
+
+    def _on_history_right_click(self, event, key: str) -> str:
+        view = self.history_views[key]
+        tv: ttk.Treeview = view["tv"]
+        row_id = tv.identify_row(event.y)
+        if not row_id:
+            return "break"
+
+        current_selection = set(tv.selection())
+        if row_id not in current_selection:
+            tv.selection_set(row_id)
+        tv.focus(row_id)
+        self._update_history_action_state(key)
+
+        menu = view.get("menu")
+        if menu is None:
+            menu = tk.Menu(tv, tearoff=0)
+            view["menu"] = menu
+        menu.delete(0, "end")
+
+        if str(row_id).startswith("scenario::"):
+            scenario = view.get("scenario_id_lookup", {}).get(row_id)
+            child_item_ids = self._scenario_child_item_ids(key, str(row_id))
+            if not scenario or not child_item_ids:
+                return "break"
+            menu.add_command(
+                label=f"刪除語境『{scenario}』底下 {len(child_item_ids)} 筆紀錄",
+                command=lambda k=key, item_ids=child_item_ids: self._history_delete_item_ids(
+                    k,
+                    item_ids,
+                    title="確認刪除語境",
+                ),
+            )
+            menu.tk_popup(event.x_root, event.y_root)
+            menu.grab_release()
+            return "break"
+
+        selected_leaf_items = self._selected_history_leaf_items(key)
+        if not selected_leaf_items:
+            return "break"
+
+        count = len(selected_leaf_items)
+        label = f"刪除所選 {count} 筆紀錄" if count > 1 else "刪除所選紀錄"
+        menu.add_command(label=label, command=lambda k=key: self._history_delete_selected(k))
+        menu.tk_popup(event.x_root, event.y_root)
+        menu.grab_release()
+        return "break"
+
+    def _history_delete_selected(self, key: str) -> None:
+        selected_leaf_items = self._selected_history_leaf_items(key)
+        if not selected_leaf_items:
+            messagebox.showinfo("提示", "請先選取至少一筆實際條目。")
+            return
+
+        item_ids = [item_id for item_id, _item in selected_leaf_items]
+        self._history_delete_item_ids(key, item_ids, title="確認批量刪除")
+
+    def _history_delete_item_ids(self, key: str, item_ids: list[str], *, title: str = "確認批量刪除") -> None:
+        item_ids = [item_id for item_id in item_ids if item_id]
+        if not item_ids:
+            messagebox.showinfo("提示", "請先選取至少一筆實際條目。")
+            return
+
+        count = len(item_ids)
+        if not messagebox.askyesno(title, f"確定刪除所選的 {count} 筆紀錄？"):
+            return
+
+        removed_total = storage.delete_items(key, item_ids)
+        self._refresh_history()
+        self.status_var.set(f"🗑 已批量刪除 {removed_total} 筆歷史。")
+
     def _history_play(self, key: str) -> None:
         _id, it = self._selected_item(key)
         if not it:
@@ -1426,13 +1534,15 @@ class TinyLessonApp:
             if not scenario:
                 messagebox.showinfo("提示", "找不到這個語境群組。請重新整理後再試。")
                 return
-            count = len(self.history_views[key]["tv"].get_children(item_id))
-            if count == 0:
+            child_item_ids = self._scenario_child_item_ids(key, str(item_id))
+            if not child_item_ids:
                 messagebox.showinfo("提示", "這個語境群組目前沒有子項。")
                 return
-            if messagebox.askyesno("確認", f"確定刪除語境『{scenario}』以及底下 {count} 筆子項？"):
-                storage.delete_scenario(key, scenario)
-                self._refresh_history()
+            self._history_delete_item_ids(
+                key,
+                child_item_ids,
+                title="確認刪除語境",
+            )
             return
         if not it:
             messagebox.showinfo("提示", "請先展開語境並選一筆條目")
@@ -1604,9 +1714,20 @@ class TinyLessonApp:
 
     def _update_history_action_state(self, key: str) -> None:
         view = self.history_views[key]
+        selected_leaf_items = self._selected_history_leaf_items(key)
         item_id, item = self._selected_item(key)
+        if len(selected_leaf_items) == 1:
+            item_id, item = selected_leaf_items[0]
         play_btn: ttk.Button = view["play_btn"]
         action_hint: ttk.Label = view["action_hint"]
+        if len(selected_leaf_items) > 1:
+            play_btn.configure(state="disabled")
+            action_hint.configure(text=f"已多選 {len(selected_leaf_items)} 筆，可按右鍵批量刪除")
+            if key == "grammar":
+                self._set_history_grammar_preview(None)
+            elif key == "translations":
+                self._set_history_translation_preview(None)
+            return
         if key == "grammar":
             self._set_history_grammar_preview(item)
         elif key == "translations":
