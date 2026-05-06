@@ -929,6 +929,7 @@ class TinyLessonApp:
     def _show_word_tooltip(self, x: int, y: int, word: str, lang_code: str) -> None:
         """Create and display a floating word-lookup tooltip near the cursor."""
         card_theme = self.theme.card_tokens()
+        is_saved = storage.has_translation(lang_code, word)
         win = tk.Toplevel(self.root)
         win.withdraw()
         win.overrideredirect(True)
@@ -978,12 +979,29 @@ class TinyLessonApp:
 
         # --- nested helpers for async fetch ---
 
+        def _sync_save_button(command=None) -> None:
+            try:
+                if not win.winfo_exists():
+                    return
+                if is_saved:
+                    save_btn.configure(state="disabled", text="✅ 已加入")
+                    return
+                if command is None:
+                    save_btn.configure(state="disabled", text="📌 加入歷史")
+                    return
+                save_btn.configure(state="normal", text="📌 加入歷史", command=command)
+            except Exception:
+                pass
+
+        _sync_save_button()
+
         def _save_word(
             translation: str,
             reading: str,
             primary_note: str,
             alternatives: list[dict[str, str]],
         ) -> None:
+            nonlocal is_saved
             slow = bool(self.settings.get("tts_slow", False))
             storage.add_translation(
                 lang_code,
@@ -994,12 +1012,9 @@ class TinyLessonApp:
                 primary_note=primary_note,
                 alternatives=alternatives,
             )
+            is_saved = True
             self._refresh_history()
-            try:
-                if win.winfo_exists():
-                    save_btn.configure(state="disabled", text="✅ 已加入")
-            except Exception:
-                pass
+            _sync_save_button()
 
         def _on_result(
             status_text: str,
@@ -1011,9 +1026,8 @@ class TinyLessonApp:
             try:
                 if win.winfo_exists():
                     status_var.set(status_text)
-                    save_btn.configure(
-                        state="normal",
-                        command=lambda t=clean, r=reading, p=primary_note, a=alternatives: _save_word(t, r, p, a),
+                    _sync_save_button(
+                        command=lambda t=clean, r=reading, p=primary_note, a=alternatives: _save_word(t, r, p, a)
                     )
             except Exception:
                 pass

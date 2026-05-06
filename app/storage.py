@@ -394,6 +394,15 @@ def add_translation(
     return {"words": [], "grammar": [], "sentences": [], "translations": [item["id"]]}
 
 
+def has_translation(lang: str, word: str) -> bool:
+    normalized_word = str(word or "").strip()
+    if not lang or not normalized_word:
+        return False
+    item_id = _make_id(lang, "t:" + normalized_word)
+    history = load_history()
+    return any(item.get("id") == item_id for item in history.get("translations", []))
+
+
 def delete_items(category: str, item_ids: list[str]) -> int:
     history = load_history()
     if category not in history or not item_ids:
