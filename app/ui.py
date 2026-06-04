@@ -7,6 +7,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from typing import Any
 
 from . import api_client, storage, tts
 from .config import AVAILABLE_MODELS, DEFAULT_MODEL, WORD_LOOKUP_CACHE_FILE, ensure_dirs
@@ -46,6 +47,9 @@ class TinyLessonApp:
         self._word_tooltip_after_id: str | None = None
         self._word_cache_lock = threading.Lock()
         self._word_translation_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._history_cache: dict[str, list[dict[str, Any]]] | None = None
+        self._history_cache_dirty = True
+        self._history_refresh_after_id: str | None = None
         self._load_word_translation_cache()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -212,6 +216,7 @@ class TinyLessonApp:
                         primary_note=normalized["primary_note"],
                         alternatives=normalized["alternatives"],
                     )
+                    self.root.after(0, self._invalidate_history_cache)
                     self.root.after(
                         0,
                         self._render_translation,
@@ -267,6 +272,7 @@ class TinyLessonApp:
                         cached_payload,
                         slow=bool(self.settings.get("tts_slow", False)),
                     )
+                    self.root.after(0, self._invalidate_history_cache)
                     self.root.after(0, self._render_results, cached_payload, lang_code)
                     self.root.after(0, self._record_undo_action, added, previous_state, "生成")
                     self.root.after(0, self.status_var.set, "✅ 已從離線快取載入課程，並同步到歷史。")
@@ -298,6 +304,7 @@ class TinyLessonApp:
                 )
                 storage.save_cached_lesson(lang_code, scenario, payload)
                 added = storage.add_batch(lang_code, scenario, payload, slow=bool(self.settings.get("tts_slow", False)))
+                self.root.after(0, self._invalidate_history_cache)
                 self.root.after(0, self._render_results, payload, lang_code)
                 self.root.after(0, self._record_undo_action, added, previous_state, "生成")
                 self.root.after(0, self.status_var.set, "✅ 完成。已存入歷史。")
@@ -580,6 +587,7 @@ class TinyLessonApp:
         removed_total = 0
         for category, item_ids in action.get("added", {}).items():
             removed_total += storage.delete_items(category, item_ids)
+        self._invalidate_history_cache()
         self._restore_snapshot(action.get("previous_state"))
         self._refresh_history()
         self._update_undo_button_state()
@@ -1013,6 +1021,7 @@ class TinyLessonApp:
                 alternatives=alternatives,
             )
             is_saved = True
+            self._invalidate_history_cache()
             self._refresh_history()
             _sync_save_button()
 
@@ -1119,7 +1128,7 @@ class TinyLessonApp:
         self.history_search_var = tk.StringVar()
         history_search_entry = ttk.Entry(filter_bar, textvariable=self.history_search_var, width=28)
         history_search_entry.pack(side="left", padx=(0, 8))
-        history_search_entry.bind("<KeyRelease>", lambda _e: self._refresh_history())
+        history_search_entry.bind("<KeyRelease>", lambda _e: self._schedule_history_refresh())
 
         ttk.Label(filter_bar, text="語言：").pack(side="left")
         self.history_lang_var = tk.StringVar(value="全部")
@@ -1277,8 +1286,29 @@ class TinyLessonApp:
             widget.xview_scroll(delta, "units")
         return "break"
 
+    def _invalidate_history_cache(self) -> None:
+        self._history_cache_dirty = True
+
+    def _get_history(self, *, force_reload: bool = False) -> dict[str, list[dict[str, Any]]]:
+        if force_reload or self._history_cache is None or self._history_cache_dirty:
+            self._history_cache = storage.load_history()
+            self._history_cache_dirty = False
+        return self._history_cache
+
+    def _schedule_history_refresh(self, delay_ms: int = 180) -> None:
+        if self._history_refresh_after_id is not None:
+            self.root.after_cancel(self._history_refresh_after_id)
+        self._history_refresh_after_id = self.root.after(delay_ms, self._run_scheduled_history_refresh)
+
+    def _run_scheduled_history_refresh(self) -> None:
+        self._history_refresh_after_id = None
+        self._refresh_history()
+
     def _refresh_history(self) -> None:
-        history = storage.load_history()
+        if self._history_refresh_after_id is not None:
+            self.root.after_cancel(self._history_refresh_after_id)
+            self._history_refresh_after_id = None
+        history = self._get_history()
         query = self.history_search_var.get().strip().lower()
         selected_lang = self.history_lang_var.get().strip() if hasattr(self, "history_lang_var") else "全部"
         self._refresh_history_language_filter(history)
@@ -1404,7 +1434,7 @@ class TinyLessonApp:
         item_lookup: dict = self.history_views[key].get("item_lookup", {})
         if item_id in item_lookup:
             return item_id, item_lookup[item_id]
-        history = storage.load_history()
+        history = self._get_history()
         for it in history.get(key, []):
             if it.get("id") == item_id:
                 self.history_views[key].setdefault("item_lookup", {})[item_id] = it
@@ -1509,6 +1539,7 @@ class TinyLessonApp:
             return
 
         removed_total = storage.delete_items(key, item_ids)
+        self._invalidate_history_cache()
         self._refresh_history()
         self.status_var.set(f"🗑 已批量刪除 {removed_total} 筆歷史。")
 
@@ -1563,16 +1594,18 @@ class TinyLessonApp:
             return
         if messagebox.askyesno("確認", "確定刪除這筆紀錄？"):
             storage.delete_item(key, item_id)
+            self._invalidate_history_cache()
             self._refresh_history()
 
     def _history_clear_tab(self, key: str) -> None:
         label = {"words": "單字", "grammar": "文法", "sentences": "句子"}.get(key, key)
-        count = len(storage.load_history().get(key, []))
+        count = len(self._get_history().get(key, []))
         if count == 0:
             messagebox.showinfo("提示", f"『{label}』歷史已經是空的。")
             return
         if messagebox.askyesno("確認清空", f"確定清空所有『{label}』歷史（共 {count} 筆）？\n此動作無法復原。"):
             storage.clear_history_category(key)
+            self._invalidate_history_cache()
             self._refresh_history()
 
     def _on_history_select(self, key: str) -> None:
@@ -1767,7 +1800,7 @@ class TinyLessonApp:
             return
         import json
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(storage.load_history(), f, ensure_ascii=False, indent=2)
+            json.dump(self._get_history(), f, ensure_ascii=False, indent=2)
         messagebox.showinfo("匯出完成", f"已匯出至：\n{path}")
 
     # ---------- settings tab ----------
@@ -1907,6 +1940,7 @@ class TinyLessonApp:
             self._clear_word_translation_cache()
             self.undo_stack.clear()
             self._update_undo_button_state()
+            self._invalidate_history_cache()
             self._refresh_history()
             messagebox.showinfo("已清除", "歷史、課程快取與查字快取已清空。")
 
