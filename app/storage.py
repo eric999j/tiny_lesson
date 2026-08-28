@@ -26,6 +26,12 @@ _EMPTY_HISTORY: dict[str, list[dict[str, Any]]] = {
 }
 
 
+# Module-level in-memory cache for the lesson cache file. Loaded lazily and
+# refreshed only when the file's mtime changes so hot lookups skip disk I/O.
+_lesson_cache_data: dict[str, dict[str, dict[str, Any]]] | None = None
+_lesson_cache_mtime: float | None = None
+
+
 def _default_languages() -> list[dict[str, str]]:
     return [dict(entry) for entry in DEFAULT_LANGUAGES]
 
@@ -172,9 +178,18 @@ def _normalize_lesson_payload(payload: Any) -> dict[str, list[dict[str, Any]]] |
 
 
 def load_lesson_cache() -> dict[str, dict[str, dict[str, Any]]]:
+    global _lesson_cache_data, _lesson_cache_mtime
+    try:
+        mtime = LESSON_CACHE_FILE.stat().st_mtime
+    except OSError:
+        mtime = None
+    if _lesson_cache_data is not None and mtime == _lesson_cache_mtime:
+        return _lesson_cache_data
     data = _read_json(LESSON_CACHE_FILE, {})
     if not isinstance(data, dict):
-        return {}
+        _lesson_cache_data = {}
+        _lesson_cache_mtime = mtime
+        return _lesson_cache_data
     normalized: dict[str, dict[str, dict[str, Any]]] = {}
     for lang, scenarios in data.items():
         if not isinstance(lang, str) or not isinstance(scenarios, dict):
@@ -192,6 +207,8 @@ def load_lesson_cache() -> dict[str, dict[str, dict[str, Any]]]:
             }
         if lang_bucket:
             normalized[lang] = lang_bucket
+    _lesson_cache_data = normalized
+    _lesson_cache_mtime = mtime
     return normalized
 
 
@@ -208,6 +225,7 @@ def get_cached_lesson(lang: str, scenario: str) -> dict[str, list[dict[str, Any]
 
 
 def save_cached_lesson(lang: str, scenario: str, payload: dict[str, list[dict[str, Any]]]) -> None:
+    global _lesson_cache_data, _lesson_cache_mtime
     normalized_scenario = _normalize_lesson_scenario(scenario)
     normalized_payload = _normalize_lesson_payload(payload)
     if not lang or not normalized_scenario or normalized_payload is None:
@@ -218,25 +236,44 @@ def save_cached_lesson(lang: str, scenario: str, payload: dict[str, list[dict[st
         "payload": normalized_payload,
     }
     _write_json(LESSON_CACHE_FILE, cache)
+    try:
+        _lesson_cache_mtime = LESSON_CACHE_FILE.stat().st_mtime
+    except OSError:
+        _lesson_cache_mtime = None
+    _lesson_cache_data = cache
 
 
 def clear_lesson_cache() -> None:
+    global _lesson_cache_data, _lesson_cache_mtime
     _write_json(LESSON_CACHE_FILE, {})
+    _lesson_cache_data = {}
+    try:
+        _lesson_cache_mtime = LESSON_CACHE_FILE.stat().st_mtime
+    except OSError:
+        _lesson_cache_mtime = None
 
 
 # ---------- history ----------
+_history_upgrade_done = False
+
+
 def load_history() -> dict[str, list[dict[str, Any]]]:
+    global _history_upgrade_done
     data = _read_json(HISTORY_FILE, None)
     if not isinstance(data, dict):
         return {k: [] for k in _EMPTY_HISTORY}
-    changed = False
     for k in _EMPTY_HISTORY:
         data.setdefault(k, [])
+    if _history_upgrade_done:
+        return data
+    changed = False
+    for k in _EMPTY_HISTORY:
         for item in data[k]:
             if isinstance(item, dict):
                 changed = _upgrade_item_audio(k, item) or changed
     if changed:
         save_history(data)
+    _history_upgrade_done = True
     return data
 
 
@@ -394,12 +431,17 @@ def add_translation(
     return {"words": [], "grammar": [], "sentences": [], "translations": [item["id"]]}
 
 
-def has_translation(lang: str, word: str) -> bool:
+def has_translation(
+    lang: str,
+    word: str,
+    history: dict[str, list[dict[str, Any]]] | None = None,
+) -> bool:
     normalized_word = str(word or "").strip()
     if not lang or not normalized_word:
         return False
     item_id = _make_id(lang, "t:" + normalized_word)
-    history = load_history()
+    if history is None:
+        history = load_history()
     return any(item.get("id") == item_id for item in history.get("translations", []))
 
 

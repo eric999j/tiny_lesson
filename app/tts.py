@@ -11,9 +11,15 @@ from .config import CACHE_DIR, ensure_dirs
 
 _lock = threading.Lock()
 _mixer_ready = False
+_lang_cache: dict[str, str] | None = None
+_lang_lower_index: dict[str, str] | None = None
+_normalize_cache: dict[str, str] = {}
 
 
 def supported_language_codes() -> dict[str, str]:
+    global _lang_cache
+    if _lang_cache is not None:
+        return _lang_cache
     try:
         from gtts.lang import tts_langs
     except ImportError as e:
@@ -22,19 +28,27 @@ def supported_language_codes() -> dict[str, str]:
             "    pip install gTTS pygame\n"
             "（或於專案資料夾執行 pip install -r requirements.txt）"
         ) from e
-    return tts_langs()
+    _lang_cache = tts_langs()
+    return _lang_cache
 
 
 def normalize_language_code(lang: str) -> str:
+    global _lang_lower_index
     code = (lang or "").strip()
     if not code:
         raise RuntimeError("TTS 語言代碼不可空白。")
+    cached = _normalize_cache.get(code)
+    if cached is not None:
+        return cached
     supported = supported_language_codes()
     if code in supported:
+        _normalize_cache[code] = code
         return code
-    lower_index = {item.lower(): item for item in supported}
-    canonical = lower_index.get(code.lower())
+    if _lang_lower_index is None:
+        _lang_lower_index = {item.lower(): item for item in supported}
+    canonical = _lang_lower_index.get(code.lower())
     if canonical:
+        _normalize_cache[code] = canonical
         return canonical
     examples = ", ".join(sorted([item for item in ["en", "id", "ja", "pt", "zh-CN", "zh-TW"] if item in supported]))
     raise RuntimeError(f"TTS 語言代碼 '{code}' 不受 gTTS 支援。可參考：{examples}")

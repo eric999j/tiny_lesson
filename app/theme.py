@@ -276,6 +276,7 @@ class ThemeManager:
         return {
             "bg": self.palette["card_bg"],
             "border": self.palette["card_border"],
+            "border_hover": self.palette["accent"],
             "title_fg": self.palette["text_fg"],
             "body_fg": self.palette["muted_fg"],
             "example_fg": self.palette["example_fg"],

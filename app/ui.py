@@ -47,10 +47,16 @@ class TinyLessonApp:
         self._word_tooltip_after_id: str | None = None
         self._word_cache_lock = threading.Lock()
         self._word_translation_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._word_cache_persist_after_id: str | None = None
         self._history_cache: dict[str, list[dict[str, Any]]] | None = None
         self._history_cache_dirty = True
         self._history_refresh_after_id: str | None = None
-        self._load_word_translation_cache()
+        self._history_haystack_cache: dict[str, str] = {}
+        self._history_lang_values: tuple[str, ...] = ("全部",)
+        self._loading_after_id: str | None = None
+        self._loading_prefix = ""
+        self._loading_dots = 0
+        self.root.after_idle(self._load_word_translation_cache_async)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.notebook = ttk.Notebook(root)
@@ -70,6 +76,48 @@ class TinyLessonApp:
         self._apply_theme()
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self._bind_shortcuts()
+
+    def _bind_shortcuts(self) -> None:
+        self.root.bind_all("<Control-Return>", self._shortcut_generate)
+        self.root.bind_all("<Control-z>", self._shortcut_undo)
+        self.root.bind_all("<Control-Z>", self._shortcut_undo)
+        self.root.bind_all("<F5>", self._shortcut_refresh_history)
+        self.root.bind_all("<Control-f>", self._shortcut_focus_search)
+        self.root.bind_all("<Control-F>", self._shortcut_focus_search)
+        self.root.bind_all("<Escape>", self._shortcut_escape)
+
+    def _shortcut_generate(self, _event=None) -> str:
+        if self.notebook.index(self.notebook.select()) != 0:
+            self.notebook.select(self.learn_tab)
+        if str(self.generate_btn.cget("state")) != "disabled":
+            self._on_generate()
+        return "break"
+
+    def _shortcut_undo(self, _event=None) -> str:
+        if str(self.undo_btn.cget("state")) != "disabled":
+            self._undo_last_action()
+        return "break"
+
+    def _shortcut_refresh_history(self, _event=None) -> str:
+        self.notebook.select(self.history_tab)
+        self._invalidate_history_cache()
+        self._refresh_history()
+        return "break"
+
+    def _shortcut_focus_search(self, _event=None) -> str:
+        if not hasattr(self, "history_search_entry"):
+            return "break"
+        self.notebook.select(self.history_tab)
+        self.history_search_entry.focus_set()
+        self.history_search_entry.select_range(0, "end")
+        return "break"
+
+    def _shortcut_escape(self, _event=None) -> str:
+        if self._word_tooltip_win is not None:
+            self._hide_word_tooltip()
+            return "break"
+        return ""
 
     # ---------- learn tab ----------
     def _build_learn_tab(self) -> None:
@@ -193,7 +241,7 @@ class TinyLessonApp:
                 return
             
             self.generate_btn.configure(state="disabled")
-            self.status_var.set("⏳ 翻譯中…")
+            self._start_loading("⏳ 翻譯中")
             self._clear_results()
             model = self.settings.get("model", "").strip() or DEFAULT_MODEL
 
@@ -228,11 +276,11 @@ class TinyLessonApp:
                         normalized["alternatives"],
                     )
                     self.root.after(0, self._record_undo_action, added, previous_state, "翻譯")
-                    self.root.after(0, self.status_var.set, "✅ 翻譯完成。已存入歷史。")
+                    self.root.after(0, self._finish_loading, "✅ 翻譯完成。已存入歷史。")
                 except api_client.APIError as e:
-                    self.root.after(0, self.status_var.set, f"❌ {e}")
+                    self.root.after(0, self._finish_loading, f"❌ {e}")
                 except Exception as e:
-                    self.root.after(0, self.status_var.set, f"❌ 未預期錯誤：{e}")
+                    self.root.after(0, self._finish_loading, f"❌ 未預期錯誤：{e}")
                 finally:
                     self.root.after(
                         0,
@@ -258,12 +306,13 @@ class TinyLessonApp:
             scenario = original_scenario
 
         self.generate_btn.configure(state="disabled")
-        self.status_var.set("⏳ 生成中…（首次呼叫模型可能需要 10–30 秒）")
         self._clear_results()
 
         model = self.settings.get("model", "").strip() or DEFAULT_MODEL
         cached_payload = storage.get_cached_lesson(lang_code, scenario)
         if cached_payload is not None:
+            self._start_loading("⏳ 載入離線課程")
+
             def _load_cached_work() -> None:
                 try:
                     added = storage.add_batch(
@@ -275,9 +324,9 @@ class TinyLessonApp:
                     self.root.after(0, self._invalidate_history_cache)
                     self.root.after(0, self._render_results, cached_payload, lang_code)
                     self.root.after(0, self._record_undo_action, added, previous_state, "生成")
-                    self.root.after(0, self.status_var.set, "✅ 已從離線快取載入課程，並同步到歷史。")
+                    self.root.after(0, self._finish_loading, "✅ 已從離線快取載入課程，並同步到歷史。")
                 except Exception as e:
-                    self.root.after(0, self.status_var.set, f"❌ 離線快取載入失敗：{e}")
+                    self.root.after(0, self._finish_loading, f"❌ 離線快取載入失敗：{e}")
                 finally:
                     self.root.after(
                         0,
@@ -289,10 +338,12 @@ class TinyLessonApp:
 
         token = self.settings.get("hf_token", "").strip()
         if not token:
-            self.status_var.set("⚠ 找不到可用的離線快取，且尚未設定 Hugging Face Token。")
+            self._finish_loading("⚠ 找不到可用的離線快取，且尚未設定 Hugging Face Token。")
             self.generate_btn.configure(state="normal" if self.languages else "disabled")
             self.notebook.select(self.settings_tab)
             return
+
+        self._start_loading("⏳ 生成中（首次呼叫可能需要 10–30 秒）")
 
         def _work():
             try:
@@ -307,11 +358,11 @@ class TinyLessonApp:
                 self.root.after(0, self._invalidate_history_cache)
                 self.root.after(0, self._render_results, payload, lang_code)
                 self.root.after(0, self._record_undo_action, added, previous_state, "生成")
-                self.root.after(0, self.status_var.set, "✅ 完成。已存入歷史。")
+                self.root.after(0, self._finish_loading, "✅ 完成。已存入歷史。")
             except api_client.APIError as e:
-                self.root.after(0, self.status_var.set, f"❌ {e}")
+                self.root.after(0, self._finish_loading, f"❌ {e}")
             except Exception as e:
-                self.root.after(0, self.status_var.set, f"❌ 未預期錯誤：{e}")
+                self.root.after(0, self._finish_loading, f"❌ 未預期錯誤：{e}")
             finally:
                 self.root.after(
                     0,
@@ -441,6 +492,7 @@ class TinyLessonApp:
             pady=8,
         )
         card.pack(fill="x", padx=4, pady=3)
+        self._attach_card_hover(card, card_theme)
 
         self._render_selectable_text(
             card,
@@ -606,6 +658,41 @@ class TinyLessonApp:
         for it in items:
             self._render_card(it, kind, lang_code)
 
+    def _attach_card_hover(self, card: tk.Frame, card_theme: dict) -> None:
+        """Give a card a subtle border-color hover feedback."""
+        hover_color = card_theme.get("border_hover") or ""
+        idle_color = card_theme.get("border", "")
+        if not hover_color or hover_color == idle_color:
+            return
+        state = {"active": False}
+
+        def _paint(color: str) -> None:
+            try:
+                card.configure(highlightbackground=color, highlightcolor=color)
+            except tk.TclError:
+                pass
+
+        def _enter(_e=None) -> None:
+            if state["active"]:
+                return
+            state["active"] = True
+            _paint(hover_color)
+
+        def _leave(_e=None) -> None:
+            try:
+                px, py = card.winfo_pointerxy()
+                cx, cy = card.winfo_rootx(), card.winfo_rooty()
+                cw, ch = card.winfo_width(), card.winfo_height()
+                if cx <= px <= cx + cw and cy <= py <= cy + ch:
+                    return
+            except tk.TclError:
+                pass
+            state["active"] = False
+            _paint(idle_color)
+
+        card.bind("<Enter>", _enter, add="+")
+        card.bind("<Leave>", _leave, add="+")
+
     def _render_card(self, it: dict, kind: str, lang_code: str) -> None:
         card_theme = self.theme.card_tokens()
         card = tk.Frame(
@@ -619,6 +706,7 @@ class TinyLessonApp:
             pady=8,
         )
         card.pack(fill="x", padx=4, pady=3)
+        self._attach_card_hover(card, card_theme)
 
         if kind == "grammar":
             target_text = it.get("point", "")
@@ -937,7 +1025,7 @@ class TinyLessonApp:
     def _show_word_tooltip(self, x: int, y: int, word: str, lang_code: str) -> None:
         """Create and display a floating word-lookup tooltip near the cursor."""
         card_theme = self.theme.card_tokens()
-        is_saved = storage.has_translation(lang_code, word)
+        is_saved = storage.has_translation(lang_code, word, history=self._get_history())
         win = tk.Toplevel(self.root)
         win.withdraw()
         win.overrideredirect(True)
@@ -1126,9 +1214,15 @@ class TinyLessonApp:
 
         ttk.Label(filter_bar, text="搜尋：").pack(side="left")
         self.history_search_var = tk.StringVar()
-        history_search_entry = ttk.Entry(filter_bar, textvariable=self.history_search_var, width=28)
-        history_search_entry.pack(side="left", padx=(0, 8))
-        history_search_entry.bind("<KeyRelease>", lambda _e: self._schedule_history_refresh())
+        self.history_search_entry = ttk.Entry(filter_bar, textvariable=self.history_search_var, width=28)
+        self.history_search_entry.pack(side="left", padx=(0, 4))
+        self.history_search_entry.bind("<KeyRelease>", lambda _e: self._schedule_history_refresh())
+        self._history_search_clear_btn = ttk.Button(
+            filter_bar, text="✕", width=2, command=self._clear_history_search,
+        )
+        self._history_search_clear_btn.pack(side="left", padx=(0, 8))
+        self.history_search_var.trace_add("write", self._on_history_search_changed)
+        self._on_history_search_changed()
 
         ttk.Label(filter_bar, text="語言：").pack(side="left")
         self.history_lang_var = tk.StringVar(value="全部")
@@ -1288,12 +1382,43 @@ class TinyLessonApp:
 
     def _invalidate_history_cache(self) -> None:
         self._history_cache_dirty = True
+        self._history_haystack_cache.clear()
 
     def _get_history(self, *, force_reload: bool = False) -> dict[str, list[dict[str, Any]]]:
         if force_reload or self._history_cache is None or self._history_cache_dirty:
             self._history_cache = storage.load_history()
             self._history_cache_dirty = False
         return self._history_cache
+
+    # ---------- loading indicator ----------
+    def _start_loading(self, prefix: str) -> None:
+        self._stop_loading()
+        self._loading_prefix = prefix
+        self._loading_dots = 1
+        self.status_var.set(f"{prefix} .")
+        self._loading_after_id = self.root.after(450, self._advance_loading)
+
+    def _advance_loading(self) -> None:
+        self._loading_after_id = None
+        if not self._loading_prefix:
+            return
+        self._loading_dots = (self._loading_dots % 3) + 1
+        self.status_var.set(f"{self._loading_prefix} {'.' * self._loading_dots}")
+        self._loading_after_id = self.root.after(450, self._advance_loading)
+
+    def _stop_loading(self) -> None:
+        if self._loading_after_id is not None:
+            try:
+                self.root.after_cancel(self._loading_after_id)
+            except Exception:
+                pass
+            self._loading_after_id = None
+        self._loading_prefix = ""
+        self._loading_dots = 0
+
+    def _finish_loading(self, message: str) -> None:
+        self._stop_loading()
+        self.status_var.set(message)
 
     def _schedule_history_refresh(self, delay_ms: int = 180) -> None:
         if self._history_refresh_after_id is not None:
@@ -1380,13 +1505,17 @@ class TinyLessonApp:
         if not hasattr(self, "history_lang_combo"):
             return
         known_langs: list[str] = []
+        seen: set[str] = set()
         for items in history.values():
             for item in items:
                 lang = str(item.get("lang", "")).strip()
-                if lang and lang not in known_langs:
+                if lang and lang not in seen:
+                    seen.add(lang)
                     known_langs.append(lang)
-        values = ["全部", *known_langs]
-        self.history_lang_combo.configure(values=values)
+        values = ("全部", *known_langs)
+        if values != self._history_lang_values:
+            self.history_lang_combo.configure(values=list(values))
+            self._history_lang_values = values
         if self.history_lang_var.get() not in values:
             self.history_lang_var.set("全部")
 
@@ -1395,32 +1524,50 @@ class TinyLessonApp:
         self.history_lang_var.set("全部")
         self._refresh_history()
 
+    def _clear_history_search(self) -> None:
+        if self.history_search_var.get():
+            self.history_search_var.set("")
+            self._refresh_history()
+        self.history_search_entry.focus_set()
+
+    def _on_history_search_changed(self, *_args) -> None:
+        btn = getattr(self, "_history_search_clear_btn", None)
+        if btn is None:
+            return
+        state = "normal" if self.history_search_var.get() else "disabled"
+        btn.configure(state=state)
+
     def _history_item_matches(self, item: dict, query: str, selected_lang: str) -> bool:
         item_lang = str(item.get("lang", "")).strip()
         if selected_lang and selected_lang != "全部" and item_lang != selected_lang:
             return False
         if not query:
             return True
-        search_parts = [
-            str(item.get("scenario", "")),
-            str(item.get("text", "")),
-            str(item.get("translation", "")),
-            str(item.get("point", "")),
-            str(item.get("explanation", "")),
-            str(item.get("example", "")),
-            str(item.get("word", "")),
-            str(item.get("reading", "")),
-            str(item.get("primary_note", "")),
-            item_lang,
-        ]
-        alternatives = item.get("alternatives", [])
-        if isinstance(alternatives, list):
-            for alternative in alternatives:
-                if not isinstance(alternative, dict):
-                    continue
-                search_parts.append(str(alternative.get("term", "")))
-                search_parts.append(str(alternative.get("note", "")))
-        haystack = "\n".join(part.lower() for part in search_parts if part)
+        item_id = str(item.get("id", ""))
+        haystack = self._history_haystack_cache.get(item_id) if item_id else None
+        if haystack is None:
+            search_parts = [
+                str(item.get("scenario", "")),
+                str(item.get("text", "")),
+                str(item.get("translation", "")),
+                str(item.get("point", "")),
+                str(item.get("explanation", "")),
+                str(item.get("example", "")),
+                str(item.get("word", "")),
+                str(item.get("reading", "")),
+                str(item.get("primary_note", "")),
+                item_lang,
+            ]
+            alternatives = item.get("alternatives", [])
+            if isinstance(alternatives, list):
+                for alternative in alternatives:
+                    if not isinstance(alternative, dict):
+                        continue
+                    search_parts.append(str(alternative.get("term", "")))
+                    search_parts.append(str(alternative.get("note", "")))
+            haystack = "\n".join(part.lower() for part in search_parts if part)
+            if item_id:
+                self._history_haystack_cache[item_id] = haystack
         return query in haystack
 
     def _selected_item(self, key: str):
@@ -2032,10 +2179,37 @@ class TinyLessonApp:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return
 
-        if not isinstance(payload, dict):
-            return
+        cache = self._parse_word_translation_cache(payload)
+        with self._word_cache_lock:
+            self._word_translation_cache = cache
 
+    def _load_word_translation_cache_async(self) -> None:
+        def _worker() -> None:
+            try:
+                with open(WORD_LOOKUP_CACHE_FILE, "r", encoding="utf-8") as fh:
+                    payload = json.load(fh)
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                return
+            cache = self._parse_word_translation_cache(payload)
+            self.root.after(0, self._apply_word_translation_cache, cache)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_word_translation_cache(
+        self, cache: dict[tuple[str, str], dict[str, Any]]
+    ) -> None:
+        with self._word_cache_lock:
+            # Merge disk snapshot without clobbering entries stored while loading.
+            for key, value in cache.items():
+                self._word_translation_cache.setdefault(key, value)
+
+    @staticmethod
+    def _parse_word_translation_cache(
+        payload: Any,
+    ) -> dict[tuple[str, str], dict[str, Any]]:
         cache: dict[tuple[str, str], dict[str, Any]] = {}
+        if not isinstance(payload, dict):
+            return cache
         for lang_code, items in payload.items():
             if not isinstance(lang_code, str) or not isinstance(items, dict):
                 continue
@@ -2062,8 +2236,7 @@ class TinyLessonApp:
                         "primary_note": primary_note,
                         "alternatives": alternatives,
                     }
-
-        self._word_translation_cache = cache
+        return cache
 
     def _persist_word_translation_cache(self) -> None:
         payload: dict[str, dict[str, dict[str, str]]] = {}
@@ -2096,7 +2269,26 @@ class TinyLessonApp:
                 "primary_note": primary_note,
                 "alternatives": list(alternatives),
             }
-            self._persist_word_translation_cache()
+        self.root.after(0, self._schedule_word_cache_persist)
+
+    def _schedule_word_cache_persist(self, delay_ms: int = 500) -> None:
+        if self._word_cache_persist_after_id is not None:
+            self.root.after_cancel(self._word_cache_persist_after_id)
+        self._word_cache_persist_after_id = self.root.after(
+            delay_ms, self._run_word_cache_persist
+        )
+
+    def _run_word_cache_persist(self) -> None:
+        self._word_cache_persist_after_id = None
+
+        def _worker() -> None:
+            try:
+                with self._word_cache_lock:
+                    self._persist_word_translation_cache()
+            except OSError:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _lookup_word_translation_cache(self, word: str, lang_code: str) -> dict[str, Any] | None:
         with self._word_cache_lock:
@@ -2113,6 +2305,18 @@ class TinyLessonApp:
     def _on_close(self) -> None:
         self._cancel_tooltip_hide()
         self._hide_word_tooltip()
+        self._stop_loading()
+        if self._word_cache_persist_after_id is not None:
+            try:
+                self.root.after_cancel(self._word_cache_persist_after_id)
+            except Exception:
+                pass
+            self._word_cache_persist_after_id = None
+            try:
+                with self._word_cache_lock:
+                    self._persist_word_translation_cache()
+            except OSError:
+                pass
         self.root.destroy()
 
 

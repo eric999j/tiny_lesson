@@ -27,6 +27,7 @@ Guidance for AI coding agents working in this repository.
   - Audio: trigger TTS and confirm playback or a handled error message.
   - Settings: save token, model, theme, or language changes and confirm they persist.
   - History: confirm new items appear, can be replayed, and can be removed cleanly.
+- Detailed flow-to-check mapping and reporting rules live in [.github/skills/tiny-lesson-manual-validation/SKILL.md](.github/skills/tiny-lesson-manual-validation/SKILL.md). Apply it after any change to `app/**/*.py` or `main.py`.
 
 ## Architecture
 
@@ -43,11 +44,12 @@ Guidance for AI coding agents working in this repository.
 
 - Persistent app data is stored under `%APPDATA%/TinyLesson` on Windows.
 - Important files managed there:
-  - `settings.json`
-  - `history.json`
-  - `word_lookup_cache.json`
-  - `tts_cache/*.mp3`
-- Keep storage changes backward-compatible when possible; [app/storage.py](app/storage.py) already contains upgrade logic for older history entries.
+  - `settings.json` – user preferences and language list.
+  - `history.json` – learn/translation history plus audio refs.
+  - `lesson_cache.json` – offline lesson payloads keyed by `(lang, normalized scenario)`; used when Learn tab has no HF token or the same scenario is generated again.
+  - `word_lookup_cache.json` – hover/quick-translate results keyed by `(word, lang)`; payload keys are `translation`, `reading`, `primary_note`, `alternatives`.
+  - `tts_cache/*.mp3` – content-hashed audio; entries are reference-counted through `history.json` and pruned on delete.
+- Keep storage changes backward-compatible when possible; [app/storage.py](app/storage.py) already contains upgrade logic for older history entries (see `_upgrade_item_audio`, gated by `_history_upgrade_done`).
 
 ## Working Conventions
 
@@ -56,6 +58,26 @@ Guidance for AI coding agents working in this repository.
 - Avoid moving API or file-system side effects into widget-building code unless the surrounding file already follows that pattern.
 - When adding a language, update the entries in [app/config.py](app/config.py) and verify both prompt language name and gTTS language code remain valid.
 - When changing model output structure, update both prompt instructions in [app/prompts.py](app/prompts.py) and parsers/normalizers in [app/api_client.py](app/api_client.py).
+- Any blocking work (HF calls, JSON writes, gTTS synth, pygame init) belongs on a worker thread; hand off UI mutations via `self.root.after(0, ...)`. Detailed rules and the canonical worker pattern live in [.github/instructions/tkinter-threading.instructions.md](.github/instructions/tkinter-threading.instructions.md).
+
+## Caching And Invariants
+
+The UI reads through several caches. Missing an invalidation call is the most common source of stale views:
+
+- **History (UI-side, in `TinyLessonApp`)** – `self._history_cache` plus `self._history_haystack_cache`. Any code path that writes history through `app/storage.py` (add_batch, add_translation, delete_item(s), delete_scenario, clear_history_category, clear_history) must be followed by `self._invalidate_history_cache()` before the next `_refresh_history()` / `_get_history()`. Worker threads should schedule the invalidate via `self.root.after(0, self._invalidate_history_cache)`.
+- **Lesson cache (module-level in `app/storage.py`)** – `load_lesson_cache()` returns an in-memory dict guarded by the file's mtime; `save_cached_lesson` / `clear_lesson_cache` update the in-memory copy in sync with the write. Do not bypass these helpers to hand-edit `lesson_cache.json`.
+- **Word lookup cache (`_word_translation_cache`)** – loaded async on startup, guarded by `self._word_cache_lock`, and flushed to disk via `_schedule_word_cache_persist` (debounced, ~500 ms). `_on_close` force-flushes any pending write; do not remove that flush. Callers should keep using `_store_word_translation_cache` / `_lookup_word_translation_cache` rather than touching the dict directly.
+- **gTTS language table (`app/tts.py`)** – `supported_language_codes()` and `normalize_language_code()` share module caches (`_lang_cache`, `_normalize_cache`). No invalidation is expected at runtime; if you ever mutate them, do it inside the module.
+
+## Keyboard Shortcuts
+
+Bound globally in `TinyLessonApp._bind_shortcuts`. Keep them working when refactoring event handling:
+
+- `Ctrl+Enter` – jump to Learn tab and trigger generate/translate.
+- `Ctrl+Z` / `Ctrl+Shift+Z` – undo last generate/translate batch (`_undo_last_action`).
+- `F5` – jump to History tab, invalidate + refresh.
+- `Ctrl+F` – jump to History tab and focus the search entry.
+- `Esc` – close the floating word tooltip.
 
 ## Known Pitfalls
 
